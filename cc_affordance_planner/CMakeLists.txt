@@ -14,7 +14,9 @@ set(EIGEN3_INCLUDE_DIR "/usr/include/eigen3")
 include_directories(include ${EIGEN3_INCLUDE_DIR})
 
 # Find the affordance_util package
-find_package(affordance_util REQUIRED)
+if(NOT TARGET affordance_util::affordance_util)
+    find_package(affordance_util REQUIRED)
+endif()
 
 # Create the library with source files
 add_library(${PROJECT_NAME} STATIC
@@ -22,6 +24,7 @@ add_library(${PROJECT_NAME} STATIC
     src/${PROJECT_NAME}/${PROJECT_NAME}_interface.cpp
     src/${PROJECT_NAME}/${PROJECT_NAME}_util.cpp
 )
+add_library(cc_affordance_planner::cc_affordance_planner ALIAS ${PROJECT_NAME})
 
 # Link this package's library against affordance_util and pthread
 target_link_libraries(${PROJECT_NAME} PUBLIC affordance_util::affordance_util pthread)

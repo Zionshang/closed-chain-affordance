@@ -2,3 +2,6 @@
 *.sw*
 # all build folders
 build/
+.codex
+.vscode
+**.so

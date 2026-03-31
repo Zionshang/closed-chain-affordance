@@ -1,0 +1,8 @@
+name: cca
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pybind11
+  - meshcat-python

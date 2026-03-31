@@ -19,6 +19,7 @@ find_package(urdfdom REQUIRED)
 
 # Define the affordance_util library
 add_library(${PROJECT_NAME} STATIC src/${PROJECT_NAME}/${PROJECT_NAME}.cpp)
+add_library(affordance_util::affordance_util ALIAS ${PROJECT_NAME})
 
 # Link libraries against the affordance_util library and make them available to downstream packages
 target_link_libraries(${PROJECT_NAME} PUBLIC yaml-cpp urdfdom_model)
