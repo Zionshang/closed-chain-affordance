@@ -51,6 +51,66 @@ Follow these steps to install the `affordance_util` and `cc_affordance_planner` 
    cd && rm -rf ~/temp_cca_ws
    ```
 
+## Python Bindings
+
+This repository also includes a `pybind11`-based Python extension and demo scripts under `python/`.
+
+### Python Environment
+
+Create or update the Conda environment from `environment.yml`:
+
+```bash
+conda env create -f environment.yml
+```
+
+If the environment already exists:
+
+```bash
+conda env update -f environment.yml
+```
+
+Then activate it:
+
+```bash
+conda activate cca
+```
+
+The environment currently includes:
+- `pybind11` for building the extension
+- `meshcat-python` for visualization
+- `pinocchio` for URDF-based MeshCat visualization
+
+### Build the Python Extension
+
+From the repository root, configure and build with the Python executable from the active environment:
+
+```bash
+cmake -S . -B build -DPython3_EXECUTABLE=$(which python)
+cmake --build build -j4
+```
+
+This builds the Python module into the `python/` directory as `closed_chain_affordance_py*.so`, so the demo scripts can import it directly.
+
+### Run the Python Demos
+
+Run the simple hard-coded UR5 demo:
+
+```bash
+python python/demo_simple.py
+```
+
+Run the x5 URDF demo:
+
+```bash
+python python/demo_x5_urdf.py
+```
+
+Run the x5 URDF demo with the Pinocchio MeshCat viewer:
+
+```bash
+python -u python/demo_x5_urdf.py --viewer
+```
+
 ## ROS2 Implementation
 
 The planner is designed for direct use in your C++ project (see the Usage section below). However, for easier implementation on physical robots, a ROS2 interface (essentially a wrapper around this C++ library) is available. Additionally, an optional user-friendly RViz plugin is provided for intuitive, code-free planning and execution.

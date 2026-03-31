@@ -5,3 +5,4 @@ build/
 .codex
 .vscode
 **.so
+__pycache__
