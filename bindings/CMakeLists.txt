@@ -12,23 +12,38 @@ if(NOT PYBIND11_INCLUDE_DIR_STATUS EQUAL 0)
         "environment or configure Python3_EXECUTABLE accordingly.")
 endif()
 
-add_library(closed_chain_affordance_py MODULE cca_bindings.cpp)
+if(DEFINED SKBUILD)
+    set(_cca_python_output_dir "${CMAKE_CURRENT_BINARY_DIR}")
+else()
+    set(_cca_python_output_dir "${CMAKE_SOURCE_DIR}/python")
+endif()
 
-target_link_libraries(closed_chain_affordance_py
+add_library(closed_chain_affordance MODULE cca_bindings.cpp)
+
+target_link_libraries(closed_chain_affordance
     PRIVATE
         Python3::Module
         affordance_util::affordance_util
         cc_affordance_planner::cc_affordance_planner
 )
 
-target_include_directories(closed_chain_affordance_py
+target_include_directories(closed_chain_affordance
     PRIVATE
         "${PYBIND11_INCLUDE_DIR}"
         /usr/include/eigen3
 )
-target_compile_features(closed_chain_affordance_py PRIVATE cxx_std_20)
+target_compile_features(closed_chain_affordance PRIVATE cxx_std_20)
 
-set_target_properties(closed_chain_affordance_py PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/python"
+set_target_properties(closed_chain_affordance PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${_cca_python_output_dir}"
     PREFIX ""
+)
+
+install(TARGETS closed_chain_affordance
+    LIBRARY DESTINATION .
+    RUNTIME DESTINATION .
+)
+
+install(FILES "${CMAKE_SOURCE_DIR}/python/closed_chain_affordance.pyi"
+    DESTINATION .
 )

@@ -1,6 +1,6 @@
 import numpy as np
 
-import closed_chain_affordance_py as cca
+import closed_chain_affordance as cca
 
 
 def build_ur5_robot_description() -> cca.RobotDescription:

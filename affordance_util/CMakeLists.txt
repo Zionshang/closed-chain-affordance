@@ -30,49 +30,41 @@ target_include_directories(${PROJECT_NAME} PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
-# Install the library
-install(TARGETS ${PROJECT_NAME}
-    EXPORT ${PROJECT_NAME}Targets
-    ARCHIVE DESTINATION lib
-    LIBRARY DESTINATION lib
-    RUNTIME DESTINATION bin
-)
-
-# Install header files
-install(DIRECTORY include/${PROJECT_NAME}
-    DESTINATION include
-)
-
 # Generate and install CMake package configuration files. The following steps enable finding this library with the find_package call in downstream packages
 include(CMakePackageConfigHelpers)
 
 # Define the version of the package
 set_target_properties(${PROJECT_NAME} PROPERTIES VERSION 1.0.0)
 
-# Generate a configuration file for find_package()
-install(EXPORT ${PROJECT_NAME}Targets
-    FILE ${PROJECT_NAME}Targets.cmake
-    NAMESPACE affordance_util::
-    DESTINATION lib/cmake/${PROJECT_NAME}
-)
+if(CCA_INSTALL_CPP_ARTIFACTS)
+    install(TARGETS ${PROJECT_NAME}
+        EXPORT ${PROJECT_NAME}Targets
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
 
-# Print the top-level source directory
-message("Top-level source directory: ${CMAKE_SOURCE_DIR}")
+    install(DIRECTORY include/${PROJECT_NAME}
+        DESTINATION include
+    )
 
-# Print the source directory of the current CMakeLists.txt file
-message("Current CMake file's source directory: ${CMAKE_CURRENT_SOURCE_DIR}")
+    install(EXPORT ${PROJECT_NAME}Targets
+        FILE ${PROJECT_NAME}Targets.cmake
+        NAMESPACE affordance_util::
+        DESTINATION lib/cmake/${PROJECT_NAME}
+    )
 
-# Create the main package configuration file
-configure_package_config_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/Config.cmake.in
-    ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake
-    INSTALL_DESTINATION lib/cmake/${PROJECT_NAME}
-)
+    configure_package_config_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/Config.cmake.in
+        ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake
+        INSTALL_DESTINATION lib/cmake/${PROJECT_NAME}
+    )
 
-install(FILES
-    ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake
-    DESTINATION lib/cmake/${PROJECT_NAME}
-)
+    install(FILES
+        ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake
+        DESTINATION lib/cmake/${PROJECT_NAME}
+    )
+endif()
 
 # Add the affordance_util library tester and link it against the affordance_util library
 add_executable(${PROJECT_NAME}_tester src/${PROJECT_NAME}_tester.cpp)

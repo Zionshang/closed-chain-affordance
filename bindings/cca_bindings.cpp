@@ -48,7 +48,7 @@ std::string read_text_file(const std::string &file_path)
 
 } // namespace
 
-PYBIND11_MODULE(closed_chain_affordance_py, m)
+PYBIND11_MODULE(closed_chain_affordance, m)
 {
     m.doc() = "Python bindings for the Closed-Chain Affordance planning framework";
 

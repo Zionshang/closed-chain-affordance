@@ -1,0 +1,31 @@
+[build-system]
+requires = [
+    "cmake>=3.22",
+    "scikit-build-core>=0.10",
+    "pybind11>=2.11",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "closed-chain-affordance"
+version = "0.1.0"
+description = "Python bindings for the Closed-Chain Affordance planning framework"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.23",
+]
+
+[project.optional-dependencies]
+viewer = [
+    "meshcat-python",
+    "pinocchio",
+]
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+wheel.packages = []
+
+[tool.scikit-build.cmake.define]
+CCA_INSTALL_CPP_ARTIFACTS = "OFF"

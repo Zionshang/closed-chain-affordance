@@ -3,7 +3,7 @@ from pathlib import Path
 
 import numpy as np
 
-import closed_chain_affordance_py as cca
+import closed_chain_affordance as cca
 from meshcat_viewer import MeshcatViewer
 
 

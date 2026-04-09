@@ -35,45 +35,42 @@ target_include_directories(${PROJECT_NAME} PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
-# Set the library installation path
-install(TARGETS ${PROJECT_NAME}
-    EXPORT ${PROJECT_NAME}Targets
-    ARCHIVE DESTINATION lib
-    LIBRARY DESTINATION lib
-    RUNTIME DESTINATION bin
-)
-
-# Install the header files
-install(FILES include/${PROJECT_NAME}/${PROJECT_NAME}.hpp
-              include/${PROJECT_NAME}/${PROJECT_NAME}_interface.hpp
-              include/${PROJECT_NAME}/${PROJECT_NAME}_util.hpp
-        DESTINATION include/${PROJECT_NAME}
-)
-
 # Generate and install CMake package configuration files. The following steps enable finding this library with the find_package call in downstream packages
 include(CMakePackageConfigHelpers)
 
 # Define the version of the package
 set_target_properties(${PROJECT_NAME} PROPERTIES VERSION 1.0.0)
 
-# Generate the Targets file for find_package()
-install(EXPORT ${PROJECT_NAME}Targets
-    FILE ${PROJECT_NAME}Targets.cmake
-    NAMESPACE cc_affordance_planner::
-    DESTINATION lib/cmake/${PROJECT_NAME}
-)
+if(CCA_INSTALL_CPP_ARTIFACTS)
+    install(TARGETS ${PROJECT_NAME}
+        EXPORT ${PROJECT_NAME}Targets
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
 
-# Create the main package configuration file
-configure_package_config_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/Config.cmake.in
-    ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake
-    INSTALL_DESTINATION lib/cmake/${PROJECT_NAME}
-)
+    install(FILES include/${PROJECT_NAME}/${PROJECT_NAME}.hpp
+                  include/${PROJECT_NAME}/${PROJECT_NAME}_interface.hpp
+                  include/${PROJECT_NAME}/${PROJECT_NAME}_util.hpp
+            DESTINATION include/${PROJECT_NAME}
+    )
 
-# Install the generated Config.cmake file
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake
+    install(EXPORT ${PROJECT_NAME}Targets
+        FILE ${PROJECT_NAME}Targets.cmake
+        NAMESPACE cc_affordance_planner::
         DESTINATION lib/cmake/${PROJECT_NAME}
-)
+    )
+
+    configure_package_config_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/Config.cmake.in
+        ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake
+        INSTALL_DESTINATION lib/cmake/${PROJECT_NAME}
+    )
+
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake
+            DESTINATION lib/cmake/${PROJECT_NAME}
+    )
+endif()
 
 # Add the cc_affordance_planner library tester and link it against the cc_affordance_planner library
 add_executable(${PROJECT_NAME}_tester src/${PROJECT_NAME}_tester.cpp)

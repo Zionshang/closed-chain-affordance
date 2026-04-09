@@ -4,6 +4,8 @@ channels:
   - defaults
 dependencies:
   - python=3.10
+  - numpy
   - pybind11
+  - scikit-build-core
   - meshcat-python
   - pinocchio

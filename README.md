@@ -18,8 +18,9 @@ This repository contains two C++ packages, `affordance_util` and `cc_affordance_
 1. `C++20`
 2. `eigen3`
 3. `urdfdom`
+4. `yaml-cpp`
 
-Install with `sudo apt install liburdfdom-dev libeigen3-dev`
+Install with `sudo apt install libyaml-cpp-dev liburdfdom-dev libeigen3-dev`
 
 ## Installation Instructions
 Follow these steps to install the `affordance_util` and `cc_affordance_planner` libraries:
@@ -77,10 +78,43 @@ conda activate cca
 
 The environment currently includes:
 - `pybind11` for building the extension
+- `scikit-build-core` for `pip`-based builds
 - `meshcat-python` for visualization
 - `pinocchio` for URDF-based MeshCat visualization
 
-### Build the Python Extension
+### Install with pip
+
+From the repository root, you can now build and install the Python extension directly:
+
+```bash
+pip install .
+```
+
+For an editable install during development:
+
+```bash
+pip install -e .
+```
+
+If you also want the visualization dependencies:
+
+```bash
+pip install ".[viewer]"
+```
+
+This installs the package as `closed-chain-affordance`, and the importable Python module is `closed_chain_affordance`:
+
+```python
+import closed_chain_affordance as cca
+```
+
+System libraries are still required before building the wheel:
+
+```bash
+sudo apt install libyaml-cpp-dev liburdfdom-dev libeigen3-dev
+```
+
+### Build the Python Extension Manually
 
 From the repository root, configure and build with the Python executable from the active environment:
 
@@ -89,7 +123,7 @@ cmake -S . -B build -DPython3_EXECUTABLE=$(which python)
 cmake --build build -j4
 ```
 
-This builds the Python module into the `python/` directory as `closed_chain_affordance_py*.so`, so the demo scripts can import it directly.
+This builds the Python module into the `python/` directory as `closed_chain_affordance*.so`, so the demo scripts can import it directly.
 
 ### Run the Python Demos
 
