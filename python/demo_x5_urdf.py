@@ -7,6 +7,10 @@ import closed_chain_affordance as cca
 from meshcat_viewer import MeshcatViewer
 
 
+VALVE_RADIUS_M = 0.08
+VALVE_OPEN_ANGLE_RAD = np.pi
+
+
 def build_x5_robot_description() -> cca.RobotDescription:
     repo_root = Path(__file__).resolve().parents[1]
     urdf_path = repo_root / "assets" / "robot" / "x5" / "urdf" / "x5.urdf"
@@ -29,14 +33,16 @@ def build_approach_task(current_pose: np.ndarray) -> cca.TaskDescription:
     return task
 
 
-def build_affordance_task(valve_pose: np.ndarray) -> cca.TaskDescription:
+def build_affordance_task(tcp_pose_on_valve: np.ndarray) -> cca.TaskDescription:
     task = cca.TaskDescription()
     affordance = cca.ScrewInfo()
     affordance.type = cca.ScrewType.ROTATION
     affordance.axis = cca.axis_to_vec(cca.Axis.X_MINUS)
-    affordance.location = valve_pose[:3, 3].copy()
+    valve_center = tcp_pose_on_valve[:3, 3].copy()
+    valve_center[2] -= VALVE_RADIUS_M
+    affordance.location = valve_center
     task.affordance_info = affordance
-    task.goal.affordance = np.pi
+    task.goal.affordance = VALVE_OPEN_ANGLE_RAD
     task.trajectory_density = 20
     return task
 
@@ -77,6 +83,8 @@ def plan_x5_trajectory() -> tuple[cca.RobotDescription, cca.PlannerResult]:
     print(valve_pose, flush=True)
 
     affordance_task = build_affordance_task(valve_pose)
+    print("valve center:", affordance_task.affordance_info.location, flush=True)
+    print("valve radius:", VALVE_RADIUS_M, flush=True)
     affordance_result = planner.generate_joint_trajectory(robot_at_valve, affordance_task)
 
     print(f"affordance success: {affordance_result.success}", flush=True)

@@ -244,22 +244,18 @@ struct RobotConfig
     struct JointNames
     {
         std::vector<std::string> robot; // Name of the joints
-        std::string gripper;            // Name of the gripper joint
     };
 
     struct FrameNames
     {
-        std::string ref;  // Name of the reference frame
-        std::string ee;   // Name of the EE frame
-        std::string tool; // Name of the frame that mimicks where the robot
-                          // would grasp external objects
+        std::string ref; // Name of the reference frame
+        std::string ee;  // Name of the EE/tool frame
     };
 
-    Eigen::MatrixXd Slist;             // Space-form screw axes
-    Eigen::Matrix4d M;                 // EE homogenous transformation matrix
-    JointNames joint_names;            // Joint names
-    FrameNames frame_names;            // Frame names
-    Eigen::Vector3d ee_to_tool_offset; // Location of the tool from the EE
+    Eigen::MatrixXd Slist;  // Space-form screw axes
+    Eigen::Matrix4d M;      // EE/tool homogenous transformation matrix
+    JointNames joint_names; // Joint names
+    FrameNames frame_names; // Frame names
 
     struct KinematicChain
     {
@@ -355,8 +351,8 @@ Eigen::Matrix4d compute_transform_from_reference_to_joint(const urdf::ModelInter
                                                           const std::string &reference_frame);
 /**
  * @brief Given a file path to a yaml file containing robot information,
- returns the robot space-form screw list, EE htm, space-frame name,
- joint_names, and tool name.
+ returns the robot space-form screw list, EE/tool htm, space-frame name,
+ and joint_names.
  * Below is an example of the information and formatting required in the YAML
  * file describing the robot. w is axis and q is location. Robot is Spot arm.
  *ref_frame:
@@ -388,27 +384,22 @@ Eigen::Matrix4d compute_transform_from_reference_to_joint(const urdf::ModelInter
  *    q: [0.7428, -0.0003, 0.0693]
  *
  *end_effector:
- *  - gripper_joint_name: arm0_fingers
- *    frame_name: arm0_fingers
- *    q: [0.86025, -0.0003, 0.08412] # EE location
- *
- *tool:
- *  - name: arm0_tool0 # This is usually at the center of the palm
- *    offset_from_ee_frame: [0.07805, 0.0008, -0.01772] # Tool location from EE
+ *  - frame_name: arm0_fingers
+ *    q: [0.86025, -0.0003, 0.08412] # EE/tool location
  * @param config_file_path File path to the config file containing robot
  information
  *
- * @return Struct containing the robot space-form screw list, EE htm,
- space-frame name, joint_names, and tool name
+ * @return Struct containing the robot space-form screw list, EE/tool htm,
+ space-frame name, and joint_names
  */
 RobotConfig robot_builder(const std::string &config_file_path);
 /**
- * @brief Given a URDF string and RobotConfig containing info to build robot from URDF returns the robot space-form screw list, EE htm, space-frame name, joint_names, tool name, and tool location.
+ * @brief Given a URDF string and RobotConfig containing info to build robot from URDF returns the robot space-form screw list, EE/tool htm, space-frame name, and joint_names.
  *
- * @param robotConfig RobotConfig containing info needed to build robot from urdf. Namely, ref_frame_name, base_joint_name as robotConfig.joint_names.robot[0], ee_frame_name, ee_to_tool_offset, and tool_name
+ * @param robotConfig RobotConfig containing info needed to build robot from urdf. Namely, ref_frame_name, base_joint_name, end_joint_name, and ee_frame_name
  *
- * @return Struct containing the robot space-form screw list, EE htm,
- * space-frame name, joint_names, and tool name
+ * @return Struct containing the robot space-form screw list, EE/tool htm,
+ * space-frame name, and joint_names
  */
 RobotConfig robot_builder(const std::string &urdf_string, const RobotConfig& robotConfig);
 
@@ -416,7 +407,7 @@ RobotConfig robot_builder(const std::string &urdf_string, const RobotConfig& rob
 * @brief Given a file path to a yaml file containing info needed to build robot from urdf, extracts that info into a RobotConfig struct
 * @param config_file_path File path to the config file containing info needed to build robot from urdf
 *
-* @return RobotConfig containing info needed to build robot from urdf. Namely, ref_frame_name, base_joint_name as robotConfig.joint_names.robot[0], ee_frame_name, ee_to_tool_offset, and tool_name.
+* @return RobotConfig containing info needed to build robot from urdf. Namely, ref_frame_name, base_joint_name, end_joint_name, and ee_frame_name.
 */
 RobotConfig extract_info_for_urdf_robot_builder(const std::string &config_file_path);
 /**

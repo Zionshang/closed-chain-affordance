@@ -317,19 +317,10 @@ RobotConfig robot_builder(const std::string &config_file_path)
 
     // Access EE info
     const YAML::Node &ee_node = config["end_effector"];
-    const std::string gripper_joint_name = ee_node[0]["gripper_joint_name"].as<std::string>();
     const std::string ee_frame_name = ee_node[0]["frame_name"].as<std::string>();
 
     Eigen::Isometry3d htm_ref_to_ee = Eigen::Isometry3d::Identity();
     htm_ref_to_ee.translation() = ee_node[0]["q"].as<Eigen::Vector3d>();
-
-    // Access tool info
-    const YAML::Node &tool_node = config["tool"];
-    const std::string tool_frame_name = tool_node[0]["name"].as<std::string>();
-
-    const Eigen::Vector3d tool_offset = tool_node[0]["offset_from_ee_frame"].as<Eigen::Vector3d>();
-    Eigen::Isometry3d htm_ee_to_tool = Eigen::Isometry3d::Identity();
-    htm_ee_to_tool.translation() = tool_offset;
 
     // Compute screw axes
     const size_t screwSize = 6;
@@ -354,12 +345,7 @@ RobotConfig robot_builder(const std::string &config_file_path)
 
     // EE info
     robotConfig.frame_names.ee = ee_frame_name;
-    robotConfig.joint_names.gripper = gripper_joint_name;
-
-    // Tool info
-    robotConfig.frame_names.tool = tool_frame_name;
-    robotConfig.M = (htm_ref_to_ee * htm_ee_to_tool).matrix();
-    robotConfig.ee_to_tool_offset = tool_offset;
+    robotConfig.M = htm_ref_to_ee.matrix();
 
     return robotConfig;
 }
@@ -384,9 +370,6 @@ RobotConfig robot_builder(const std::string &urdf_string, const RobotConfig& rob
 
     // EE info
     const std::string &ee_frame_name = robotConfig.frame_names.ee;
-
-    // Tool info
-    const Eigen::Vector3d& tool_location = robotConfig.ee_to_tool_offset;
 
     const urdf::ModelInterfaceSharedPtr model = urdf::parseURDF(urdf_string);
 
@@ -496,13 +479,8 @@ RobotConfig robot_builder(const std::string &urdf_string, const RobotConfig& rob
     // Screw list
     robot_config.Slist = s_list;
 
-    // Deduce tool HTM -- 
-    const Eigen::Matrix4d T_ref_to_ee = compute_transform_from_reference_to_link(model, ee_frame_name, ref_frame_name);
-    Eigen::Matrix4d T_ee_to_tool =  Eigen::Matrix4d::Identity();
-    T_ee_to_tool.block<3, 1>(0, 3) = tool_location;
-    const Eigen::Matrix4d M = T_ref_to_ee * T_ee_to_tool;
-
-    robot_config.M = M;
+    // The configured EE frame is the planning tool/TCP frame.
+    robot_config.M = compute_transform_from_reference_to_link(model, ee_frame_name, ref_frame_name);
 
     return robot_config;
 }
@@ -532,13 +510,6 @@ RobotConfig extract_info_for_urdf_robot_builder(const std::string &config_file_p
     // Access EE info
     const YAML::Node &ee_node = config["end_effector"];
     const std::string ee_frame_name = ee_node[0]["frame_name"].as<std::string>();
-    const std::string gripper_joint_name = ee_node[0]["gripper_joint_name"].as<std::string>();
-
-    // Access tool info
-    const YAML::Node &tool_node = config["tool"];
-    const std::string tool_frame_name = tool_node[0]["name"].as<std::string>();
-    const Eigen::Vector3d tool_offset = tool_node[0]["offset_from_ee_frame"].as<Eigen::Vector3d>();
-   
 
     // Reference frame name
     robotConfig.frame_names.ref = ref_frame_name;
@@ -549,11 +520,6 @@ RobotConfig extract_info_for_urdf_robot_builder(const std::string &config_file_p
 
     // EE frame name
     robotConfig.frame_names.ee = ee_frame_name;
-    robotConfig.joint_names.gripper = gripper_joint_name;
-
-    // Tool info
-    robotConfig.frame_names.tool = tool_frame_name;
-    robotConfig.ee_to_tool_offset = tool_offset;
 
     return robotConfig;
 }
