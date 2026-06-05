@@ -26,6 +26,14 @@ viewer = [
 [tool.scikit-build]
 cmake.build-type = "Release"
 wheel.packages = []
+sdist.exclude = [
+    "assets/**",
+    "python/**",
+]
+wheel.exclude = [
+    "python/**",
+    "assets/**",
+]
 
 [tool.scikit-build.cmake.define]
 CCA_INSTALL_CPP_ARTIFACTS = "OFF"
