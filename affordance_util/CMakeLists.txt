@@ -65,7 +65,3 @@ if(CCA_INSTALL_CPP_ARTIFACTS)
         DESTINATION lib/cmake/${PROJECT_NAME}
     )
 endif()
-
-# Add the affordance_util library tester and link it against the affordance_util library
-add_executable(${PROJECT_NAME}_tester src/${PROJECT_NAME}_tester.cpp)
-target_link_libraries(${PROJECT_NAME}_tester ${PROJECT_NAME})
