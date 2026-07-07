@@ -1,20 +1,18 @@
 [build-system]
-requires = [
-    "cmake>=3.22",
-    "scikit-build-core>=0.10",
-    "pybind11>=2.11",
-]
-build-backend = "scikit_build_core.build"
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "closed-chain-affordance"
 version = "0.1.0"
-description = "Python bindings for the Closed-Chain Affordance planning framework"
+description = "Pure-Python implementation of the Closed-Chain Affordance planning framework"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.23",
+    "scipy>=1.10",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -22,18 +20,21 @@ viewer = [
     "meshcat-python",
     "pinocchio",
 ]
-
-[tool.scikit-build]
-cmake.build-type = "Release"
-wheel.packages = []
-sdist.exclude = [
-    "assets/**",
-    "python/**",
-]
-wheel.exclude = [
-    "python/**",
-    "assets/**",
+dev = [
+    "pytest>=7",
 ]
 
-[tool.scikit-build.cmake.define]
-CCA_INSTALL_CPP_ARTIFACTS = "OFF"
+[tool.setuptools]
+packages = ["closed_chain_affordance"]
+package-dir = { "" = "python" }
+
+[tool.setuptools.package-data]
+closed_chain_affordance = ["py.typed", "*.pyi"]
+
+# NOTE: The original C++ / pybind11 implementation still lives under
+# affordance_util/, cc_affordance_planner/, and bindings/. It is no longer built
+# by `pip install .` (the pure-Python package above is the default), but it can
+# still be built as a reference for the equivalence tests under tests/ with:
+#   cmake -S . -B build -DPython3_EXECUTABLE=$(which python)
+#   cmake --build build -j4
+# then move python/closed_chain_affordance.so into tests/_cpp_ref/.

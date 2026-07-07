@@ -5,7 +5,11 @@ channels:
 dependencies:
   - python=3.10
   - numpy
-  - pybind11
-  - scikit-build-core
+  - scipy
+  - pyyaml
   - meshcat-python
   - pinocchio
+  # Build tooling for the optional C++ reference binding used by tests/
+  - pybind11
+  - cmake
+  - ninja

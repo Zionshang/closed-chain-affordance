@@ -82,9 +82,11 @@ The environment currently includes:
 - `meshcat-python` for visualization
 - `pinocchio` for URDF-based MeshCat visualization
 
-### Install with pip
+### Install with pip (pure-Python package)
 
-From the repository root, you can now build and install the Python extension directly:
+The Python interface is implemented in pure Python (NumPy + SciPy + PyYAML) and
+lives under `python/closed_chain_affordance/`. No C++ build is required to use
+it. From the repository root:
 
 ```bash
 pip install .
@@ -108,22 +110,39 @@ This installs the package as `closed-chain-affordance`, and the importable Pytho
 import closed_chain_affordance as cca
 ```
 
-System libraries are still required before building the wheel:
+### Build the C++ reference binding (optional)
+
+The original C++ / pybind11 implementation under `affordance_util/`,
+`cc_affordance_planner/`, and `bindings/` is kept as a reference for the
+equivalence tests. It is **not** needed to use the pure-Python package. To build
+it and stage it for the tests:
 
 ```bash
-sudo apt install libyaml-cpp-dev liburdfdom-dev libeigen3-dev
-```
-
-### Build the Python Extension Manually
-
-From the repository root, configure and build with the Python executable from the active environment:
-
-```bash
+sudo apt install libyaml-cpp-dev liburdfdom-dev libeigen3-dev   # one-time system deps
 cmake -S . -B build -DPython3_EXECUTABLE=$(which python)
 cmake --build build -j4
+mkdir -p tests/_cpp_ref
+mv python/closed_chain_affordance.so tests/_cpp_ref/   # keep it out of the package path
 ```
 
-This builds the Python module into the `python/` directory as `closed_chain_affordance*.so`, so the demo scripts can import it directly.
+### Equivalence Tests (C++ binding vs. pure Python)
+
+`tests/test_cpp_python_equivalence.py` drives both implementations with
+identical inputs and asserts the planned joint trajectories match. Each scenario
+runs in its own subprocess (one importing only the C++ binding, one importing
+only the pure-Python package), which avoids the BLAS/LAPACK conflict that occurs
+when Eigen (via the binding) and OpenBLAS (via NumPy) share a single process.
+
+```bash
+python tests/test_cpp_python_equivalence.py
+# or: pytest tests/test_cpp_python_equivalence.py -q
+```
+
+On converging scenarios the trajectories agree to floating-point precision
+(rotation/translation/screw: ≤ ~1e-13; the x5 Cartesian approach: ~1e-7 from
+pseudoinverse round-off accumulating across the IK steps). The `BEST` update
+method is compared structurally (success / description / length) since the
+winning planner is scheduling-dependent.
 
 ### Run the Python Demos
 
@@ -133,7 +152,7 @@ Run the simple hard-coded UR5 demo:
 python python/demo_simple.py
 ```
 
-Run the x5 URDF demo:
+Run the x5 URDF demo (planning only):
 
 ```bash
 python python/demo_x5_urdf.py

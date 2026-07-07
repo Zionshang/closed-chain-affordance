@@ -194,3 +194,5 @@ def build_robot_description_from_urdf(
     joint_states: NDArray[np.float64] | None = ...,
     gripper_state: float = ...,
 ) -> RobotDescription: ...
+
+__version__: str
