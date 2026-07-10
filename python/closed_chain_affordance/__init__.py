@@ -61,6 +61,22 @@ from .planner import (
     CcAffordancePlannerInverse,
     CcAffordancePlannerTranspose,
 )
+
+# Batched PyTorch planner (optional; requires torch). Imported lazily so the core
+# package keeps working without torch installed.
+try:
+    from .batched_planner import (
+        BatchedCcAffordancePlanner,
+        BatchedCcAffordancePlannerInterface,
+        BatchedMotionResult,
+        BatchedPlannerResult,
+        compose_cc_model_slist as compose_cc_model_slist_batched,
+        plan_batch,
+    )
+    _HAS_TORCH = True
+except ImportError:  # pragma: no cover - torch is an optional dependency
+    _HAS_TORCH = False
+
 from .robot_builder import (
     build_robot_description_from_urdf,
     build_robot_description_from_yaml,
@@ -149,3 +165,13 @@ __all__ = [
     "vec_to_so3",
     "__version__",
 ]
+
+if _HAS_TORCH:  # extend the public surface only when torch is available
+    __all__ += [
+        "BatchedCcAffordancePlanner",
+        "BatchedCcAffordancePlannerInterface",
+        "BatchedMotionResult",
+        "BatchedPlannerResult",
+        "compose_cc_model_slist_batched",
+        "plan_batch",
+    ]
