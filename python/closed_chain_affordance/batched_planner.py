@@ -8,17 +8,17 @@ Lab asks for, where ``B`` is the number of parallel environments.
 
 Algorithmic mapping (see the design discussion for detail):
 
-* The two convergence ``while`` loops become **fixed-iteration loops with a
-  per-element convergence mask** — once an environment has converged its joint
-  vector is frozen (further iterations are a no-op for it), so the per-element
-  result is identical to the single-shot solver while control flow stays uniform
-  across the batch.
+* The scalar convergence loops become bounded loops with a per-element mask.
+  Exact mode checks for whole-batch convergence every iteration; optional
+  chunked and compiled fixed-iteration modes expose different synchronisation /
+  empty-work trade-offs.
 * The conditional DLS branch in the inverse update is evaluated **branch-free**
   via ``torch.where`` (both branches computed, selected element-wise), so it
   reproduces the reference numerics exactly rather than always damping.
-* ``pinv`` is used where the reference uses it; the per-row-vector pseudoinverse
-  of ``theta_pdot`` is special-cased to a normalised form (its closed form),
-  avoiding a real SVD for a 1×n matrix.
+* Pseudoinverse products are applied directly from a thin SVD instead of
+  materialising inverse matrices. One-row updates (the common affordance-only
+  case) use their closed form, and float32 throughput mode can opt into
+  regularised normal equations for two remaining applications.
 
 All batch elements must share the same structure (robot DOF, virtual-screw order,
 motion type, trajectory density); only the *values* (joint state, goals, screws,
@@ -60,9 +60,57 @@ _VIR_SCREW_AXES = {
     VirtualScrewOrder.YZX: ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
     VirtualScrewOrder.ZXY: ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
     VirtualScrewOrder.XY: ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
-    VirtualScrewOrder.YZ: ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
-    VirtualScrewOrder.ZX: ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
+    # Exact column order from the C++ get_vir_screw_axes implementation.
+    VirtualScrewOrder.YZ: ((0.0, 1.0, 0.0), (1.0, 0.0, 0.0)),
+    VirtualScrewOrder.ZX: ((0.0, 1.0, 1.0), (0.0, 0.0, 0.0)),
 }
+
+
+def _svd_pinv_apply(matrix: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
+    """Apply the Moore-Penrose inverse without materialising it.
+
+    This preserves the SVD/rank-threshold semantics of ``torch.linalg.pinv``
+    while avoiding construction of the full pseudoinverse tensor.  It is used
+    by the parity-oriented mode; throughput mode may use regularised normal
+    equations instead.
+    """
+    u, singular_values, vh = torch.linalg.svd(matrix, full_matrices=False)
+    eps = torch.finfo(matrix.dtype).eps
+    cutoff = singular_values[..., :1] * (max(matrix.shape[-2:]) * eps)
+    safe_values = torch.where(
+        singular_values > cutoff, singular_values, torch.ones_like(singular_values)
+    )
+    reciprocal = torch.where(
+        singular_values > cutoff, safe_values.reciprocal(), torch.zeros_like(singular_values)
+    )
+    projected = u.transpose(-2, -1) @ rhs
+    return vh.transpose(-2, -1) @ (reciprocal.unsqueeze(-1) * projected)
+
+
+def _regularized_pinv_apply(matrix: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
+    """Fast minimum-norm solve using regularised normal equations.
+
+    This avoids SVD and the associated CUDA synchronisation.  A scale-aware,
+    dtype-specific diagonal term keeps rank-deficient batches finite.  It is an
+    explicitly opt-in throughput approximation; the default path remains the
+    exact SVD implementation above.
+    """
+    rows, cols = matrix.shape[-2:]
+    base = 1e-7 if matrix.dtype in (torch.float16, torch.bfloat16, torch.float32) else 1e-12
+    if rows >= cols:
+        transposed = matrix.transpose(-2, -1)
+        gram = transposed @ matrix
+        scale = torch.diagonal(gram, dim1=-2, dim2=-1).abs().amax(dim=-1).clamp(min=1.0)
+        eye = torch.eye(cols, dtype=matrix.dtype, device=matrix.device)
+        regularized = gram + (base * scale)[..., None, None] * eye
+        return torch.linalg.solve_ex(regularized, transposed @ rhs).result
+
+    gram = matrix @ matrix.transpose(-2, -1)
+    scale = torch.diagonal(gram, dim1=-2, dim2=-1).abs().amax(dim=-1).clamp(min=1.0)
+    eye = torch.eye(rows, dtype=matrix.dtype, device=matrix.device)
+    regularized = gram + (base * scale)[..., None, None] * eye
+    dual = torch.linalg.solve_ex(regularized, rhs).result
+    return matrix.transpose(-2, -1) @ dual
 
 
 # --------------------------------------------------------------------------- #
@@ -155,6 +203,8 @@ class BatchedMotionResult:
     joint_trajectory: torch.Tensor  # [B, m-1, n]  (differential cc joint points)
     valid_mask: torch.Tensor  # [B, m-1] bool — which steps converged
     description_codes: torch.Tensor  # [B] long — 0 UNSET / 1 PARTIAL / 2 FULL
+    active_iterations: torch.Tensor  # [B, m-1] long — useful iterations per environment
+    executed_iterations: torch.Tensor  # [m-1] long — iterations actually executed by each batched solve
     update_trail: str = ""
 
 
@@ -180,32 +230,67 @@ class BatchedCcAffordancePlanner:
         self.cond_N_threshold_ = 100.0
         self.lambda_ = 1.1
         self.goal_min_ = 1e-5
-        # When True, the IK loop early-exits once every batch element has converged
-        # (matches the single-shot solver exactly). When False it runs a fixed
-        # iteration count with no per-iteration GPU->CPU sync, which makes the
-        # control flow static and lets torch.compile fuse the loop — much faster on
-        # GPU for large batches. Converged elements still freeze in place because
-        # the Newton update is ~0 at the solution, so well-conditioned results are
-        # unchanged; see :meth:`enable_fast_mode`.
+        # Check convergence in small chunks.  A check interval of one reproduces
+        # the scalar solver's control flow, while a small interval (typically 4)
+        # avoids synchronising CUDA with the host on every Newton step without
+        # blindly running all ``ik_max_itr`` iterations.
         self.early_stop_ = True
+        self.early_stop_check_interval_ = 1
+        self.fast_solve_ = False
+        self._compiled_ = False
 
     # ------------------------------------------------------------------ #
-    def enable_fast_mode(self, compile: bool = True):
+    def enable_fast_mode(self, compile: bool = True, fast_solve: bool = False):
         """Switch to the GPU-throughput-optimised IK loop.
 
         Disables the per-iteration early-exit (which forces a GPU->CPU sync every
         iteration and breaks ``torch.compile`` fusion) so the loop runs a fixed
         iteration count with static control flow, then optionally ``torch.compile``s
-        it. Converged environments still freeze in place (the Newton update is ~0
-        at the solution), so well-conditioned results are unchanged — only the
-        runtime improves, often by orders of magnitude at large batch sizes.
+        it. Converged environments are frozen by a mask, so results are unchanged,
+        but the kernel still executes ``ik_max_itr`` times. Compilation has a high
+        one-time cost and fixed iteration can be slower than eager early stopping;
+        benchmark this mode on the target GPU and reuse the compiled planner.
         """
         self.early_stop_ = False
-        if compile:
+        self.fast_solve_ = bool(fast_solve)
+        if compile and not self._compiled_:
             self._call_cc_ik_solver = torch.compile(self._call_cc_ik_solver, dynamic=False)
+            self._compiled_ = True
+        return self
+
+    def enable_chunked_early_stop(self, check_interval: int = 4, fast_solve: bool = False):
+        """Use batched early stopping while checking the device every few steps.
+
+        This amortises host checks and keeps the exact convergence masks, but may execute at most
+        ``check_interval - 1`` masked no-op iterations after the last environment
+        converges. Small-matrix workloads can still be faster with the default
+        interval of one, so this mode should also be benchmarked.
+        """
+        if check_interval < 1:
+            raise ValueError("check_interval must be >= 1")
+        if self._compiled_:
+            raise RuntimeError(
+                "Cannot re-enable data-dependent early stopping after compiling the IK solver."
+            )
+        self.early_stop_ = True
+        self.early_stop_check_interval_ = int(check_interval)
+        self.fast_solve_ = bool(fast_solve)
+        return self
+
+    def enable_fast_linear_solver(self, enabled: bool = True):
+        """Use regularised normal equations for ``pinv(A) @ b`` applications.
+
+        This removes two SVDs per Newton iteration and is intended for float32
+        trajectory generation. The default exact SVD path remains preferable
+        for reference/parity work.
+        """
+        if self._compiled_:
+            raise RuntimeError("Linear-solver mode must be selected before compiling the IK solver.")
+        self.fast_solve_ = bool(enabled)
         return self
 
     # ------------------------------------------------------------------ #
+    @torch.inference_mode()
     def generate_motion_joint_trajectory(
         self,
         cc_slist: torch.Tensor,
@@ -221,6 +306,28 @@ class BatchedCcAffordancePlanner:
         joint goals, last entry = affordance goal; for approach the second-last =
         approach limit), ``task_offset_tau`` = number of secondary joints.
         """
+        if cc_slist.ndim != 3 or cc_slist.shape[-2] != _TWIST_LENGTH:
+            raise ValueError("cc_slist must have shape [B, 6, n]")
+        if theta_sdf.ndim != 2 or theta_sdf.shape[0] != cc_slist.shape[0]:
+            raise ValueError("theta_sdf must have shape [B, task_offset_tau]")
+        if task_offset_tau != theta_sdf.shape[-1] or not (0 < task_offset_tau < cc_slist.shape[-1]):
+            raise ValueError("task_offset_tau must match theta_sdf and leave at least one primary joint")
+        if int(stepper_max_itr_m) < 2:
+            raise ValueError("stepper_max_itr_m must be >= 2")
+
+        if update_method == UpdateMethod.BEST or (
+            update_method is None and self.update_method_ == UpdateMethod.BEST
+        ):
+            inverse = self.generate_motion_joint_trajectory(
+                cc_slist, theta_sdf, task_offset_tau, stepper_max_itr_m,
+                has_approach=has_approach, update_method=UpdateMethod.INVERSE,
+            )
+            transpose = self.generate_motion_joint_trajectory(
+                cc_slist, theta_sdf, task_offset_tau, stepper_max_itr_m,
+                has_approach=has_approach, update_method=UpdateMethod.TRANSPOSE,
+            )
+            return self._select_best(inverse, transpose)
+
         start = time.perf_counter()
         method = self.update_method_ if update_method is None else update_method
 
@@ -248,35 +355,41 @@ class BatchedCcAffordancePlanner:
         theta_sg = torch.zeros(B, n_s, dtype=cc_slist.dtype, device=cc_slist.device)
         theta_pg = torch.zeros(B, n_p, dtype=cc_slist.dtype, device=cc_slist.device)
 
-        traj_points = []  # carry-forward "cleaned" points (dense + safe for target use)
+        # Keep one dense output point per requested target.  A failed point stores
+        # the IK solver's final candidate; ``valid_mask`` remains the authority on
+        # whether that candidate actually satisfies the convergence tolerances.
+        traj_points = []
         valid_steps = []
+        active_iterations = []
+        executed_iterations = []
         steps_converged = torch.zeros(B, dtype=cc_slist.dtype, device=cc_slist.device)
-        last_good = torch.zeros(B, n_p + n_s, dtype=cc_slist.dtype, device=cc_slist.device)
-
         for _ in range(m - 1):
             theta_sd = theta_sd.clone()
             theta_sd[..., -1] = theta_sd[..., -1] - deltatheta_a
             if has_approach:
                 theta_sd[..., -2] = theta_sd[..., -2] - deltatheta_p
 
-            theta_out, conv = self._call_cc_ik_solver(
+            theta_out, conv, active_itr, executed_itr = self._call_cc_ik_solver(
                 cc_slist, theta_pg, theta_sg, theta_sd, theta_s_tol, n_p, n_s, method
             )
-            # On a failed step, hold the last good configuration (carry-forward) so the
-            # dense trajectory stays a valid, monotone target; the converged prefix still
-            # matches the single-shot solver exactly.
+            # Preserve the final candidate even when this target did not converge.
+            # It is diagnostic/approximate output only when ``conv`` is false.
             conv_mask = conv.unsqueeze(-1)
-            last_good = torch.where(conv_mask, theta_out, last_good)
-            traj_points.append(last_good)
+            traj_points.append(theta_out)
             valid_steps.append(conv)
+            active_iterations.append(active_itr)
+            executed_iterations.append(executed_itr)
             steps_converged = steps_converged + conv.to(cc_slist.dtype)
 
-            # Warm-start the next step only from successful elements.
+            # Do not let a potentially divergent failed candidate contaminate later
+            # solves: warm-start the next target only from accepted solutions.
             theta_pg = torch.where(conv_mask, theta_out[..., :n_p], theta_pg)
             theta_sg = torch.where(conv_mask, theta_out[..., n_p:], theta_sg)
 
         joint_trajectory = torch.stack(traj_points, dim=1)  # [B, m-1, n]
         valid_mask = torch.stack(valid_steps, dim=1)  # [B, m-1]
+        active_iterations_t = torch.stack(active_iterations, dim=1)  # [B, m-1]
+        executed_iterations_t = torch.stack(executed_iterations, dim=0)  # [m-1]
 
         full = steps_converged == (m - 1)
         any_ok = steps_converged > 0
@@ -287,7 +400,37 @@ class BatchedCcAffordancePlanner:
         trail = method.name.lower()  # "inverse" / "transpose"
         # elapsed time is informational only (timing inside a batched call is not per-element)
         _ = (time.perf_counter() - start)
-        return BatchedMotionResult(joint_trajectory, valid_mask, desc, update_trail=trail)
+        return BatchedMotionResult(
+            joint_trajectory, valid_mask, desc, active_iterations_t,
+            executed_iterations_t, update_trail=trail,
+        )
+
+    @staticmethod
+    def _select_best(inverse: BatchedMotionResult, transpose: BatchedMotionResult) -> BatchedMotionResult:
+        """Deterministically select the better update method per environment.
+
+        A FULL trajectory wins over a non-FULL one. Otherwise the method with
+        more converged points wins; ties select transpose, matching the scalar
+        planner's final tie-break. If both are FULL, inverse is selected.
+        """
+        inv_full = inverse.description_codes == _DESC_CODE[TrajectoryDescription.FULL]
+        tra_full = transpose.description_codes == _DESC_CODE[TrajectoryDescription.FULL]
+        inv_count = inverse.valid_mask.sum(dim=-1)
+        tra_count = transpose.valid_mask.sum(dim=-1)
+        choose_inverse = inv_full | (~tra_full & (inv_count > tra_count))
+
+        traj_mask = choose_inverse[:, None, None]
+        step_mask = choose_inverse[:, None]
+        trajectory = torch.where(traj_mask, inverse.joint_trajectory, transpose.joint_trajectory)
+        valid = torch.where(step_mask, inverse.valid_mask, transpose.valid_mask)
+        desc = torch.where(choose_inverse, inverse.description_codes, transpose.description_codes)
+        active = torch.where(step_mask, inverse.active_iterations, transpose.active_iterations)
+        # Both planners were evaluated, so this is the actual total compute cost.
+        executed = inverse.executed_iterations + transpose.executed_iterations
+        return BatchedMotionResult(
+            trajectory, valid, desc, active, executed,
+            update_trail="best (per-environment inverse/transpose selection)",
+        )
 
     # ------------------------------------------------------------------ #
     def _call_cc_ik_solver(
@@ -300,6 +443,8 @@ class BatchedCcAffordancePlanner:
         theta_s = theta_sg.clone()
         oldtheta_p = torch.zeros_like(theta_p)
         rho = torch.zeros(*theta_p.shape[:-1], _TWIST_LENGTH, dtype=dtype, device=device)
+        active_iterations = torch.zeros(theta_p.shape[0], dtype=torch.long, device=device)
+        executed_count = 0
 
         def closure_err(theta_s_vec, rho_vec):
             s_err = (theta_sd - theta_s_vec).abs()
@@ -311,10 +456,17 @@ class BatchedCcAffordancePlanner:
         err = closure_err(theta_s, rho)
         converged = ~err  # already-converged elements stay frozen
 
-        for _ in range(self.max_itr_l_):
+        for iteration in range(self.max_itr_l_):
             active = (~converged) & err
-            if self.early_stop_ and not bool(active.any()):
+            if (
+                self.early_stop_
+                and iteration % self.early_stop_check_interval_ == 0
+                and not bool(active.any())
+            ):
                 break  # early-exit (forces a GPU sync this iteration)
+
+            active_iterations = active_iterations + active.to(torch.long)
+            executed_count = iteration + 1
 
             thetalist = torch.cat([theta_p, theta_s], dim=-1)  # [B, n]
             jac = M.jacobian_space(cc_slist, thetalist)  # [B, 6, n]
@@ -322,13 +474,19 @@ class BatchedCcAffordancePlanner:
             n_s_jac = jac[..., n_p:]
 
             theta_pdot = (theta_p - oldtheta_p) / _DT  # [B, n_p]
-            pinv_n_s = torch.linalg.pinv(n_s_jac)  # [B, n_s, 6]
             denom = (theta_pdot * theta_pdot).sum(dim=-1, keepdim=True)
             denom = torch.clamp(denom, min=1e-30)  # pinv of a zero row -> 0
             pinv_tpd = theta_pdot / denom  # [B, n_p]
             outer_term = rho.unsqueeze(-1) * pinv_tpd.unsqueeze(-2)  # [B, 6, n_p]
 
-            n_mat = -(pinv_n_s @ (n_p_jac + outer_term))  # [B, n_s, n_p]
+            # Apply ``pinv(Ns)`` directly to the right-hand side. Exact mode
+            # uses SVD rank semantics; the opt-in throughput mode uses a small
+            # regularised normal-equation solve without host synchronisation.
+            rhs = n_p_jac + outer_term
+            if self.fast_solve_:
+                n_mat = -_regularized_pinv_apply(n_s_jac, rhs)
+            else:
+                n_mat = -_svd_pinv_apply(n_s_jac, rhs)
 
             oldtheta_p = theta_p
             theta_p_step = self._update_theta_p(theta_p, theta_sd, theta_s, n_mat, method)
@@ -346,7 +504,8 @@ class BatchedCcAffordancePlanner:
             err = torch.where(active, new_err, err)
 
         theta_out = torch.cat([theta_p, theta_s], dim=-1)  # [B, n]
-        return theta_out, converged
+        executed_iterations = torch.full((), executed_count, dtype=torch.long, device=device)
+        return theta_out, converged, active_iterations, executed_iterations
 
     # ------------------------------------------------------------------ #
     def _update_theta_p(self, theta_p, theta_sd, theta_s, n_mat, method):
@@ -355,15 +514,38 @@ class BatchedCcAffordancePlanner:
             delta = n_mat.transpose(-2, -1) @ diff  # [B, n_p, 1]
             return theta_p + delta.squeeze(-1)
 
-        # INVERSE: pinv normally, DLS near singularities. Compute both, select element-wise.
-        pinv_n = torch.linalg.pinv(n_mat)  # [B, n_p, n_s]
-        cond = n_mat.norm(dim=(-2, -1)) * pinv_n.norm(dim=(-2, -1))  # [B]
-        delta_pinv = (pinv_n @ diff).squeeze(-1)  # [B, n_p]
+        # A single secondary constraint is the common affordance-only case.
+        # Its pseudoinverse has a closed form and its non-zero Frobenius
+        # condition estimate is exactly one, so the DLS branch cannot be chosen.
+        # Avoiding an SVD here removes one decomposition from every IK iteration.
+        if n_mat.shape[-2] == 1:
+            denom = n_mat.square().sum(dim=-1, keepdim=True)
+            safe_denom = torch.where(denom > 0, denom, torch.ones_like(denom))
+            delta = n_mat.transpose(-2, -1) @ (diff / safe_denom)
+            return theta_p + delta.squeeze(-1)
 
-        nnt = n_mat @ n_mat.transpose(-2, -1)  # [B, n_s, n_s]
-        eye_s = torch.eye(n_mat.shape[-2], dtype=n_mat.dtype, device=n_mat.device)
-        dls_inner = torch.linalg.pinv(nnt + (self.lambda_ ** 2) * eye_s)  # [B, n_s, n_s]
-        delta_dls = (n_mat.transpose(-2, -1) @ dls_inner @ diff).squeeze(-1)  # [B, n_p]
+        # INVERSE: one thin SVD supplies the pseudoinverse update, the original
+        # Frobenius condition estimate, and the DLS update. The previous code
+        # decomposed N and (N N^T + lambda^2 I) separately on every iteration.
+        u, singular_values, vh = torch.linalg.svd(n_mat, full_matrices=False)
+        eps = torch.finfo(n_mat.dtype).eps
+        cutoff = singular_values[..., :1] * (max(n_mat.shape[-2:]) * eps)
+        safe_values = torch.where(
+            singular_values > cutoff, singular_values, torch.ones_like(singular_values)
+        )
+        reciprocal = torch.where(
+            singular_values > cutoff, safe_values.reciprocal(), torch.zeros_like(singular_values)
+        )
+        projected = u.transpose(-2, -1) @ diff
+        v = vh.transpose(-2, -1)
+        delta_pinv = (v @ (reciprocal.unsqueeze(-1) * projected)).squeeze(-1)
+
+        norm_n = torch.sqrt((singular_values * singular_values).sum(dim=-1))
+        norm_pinv = torch.sqrt((reciprocal * reciprocal).sum(dim=-1))
+        cond = norm_n * norm_pinv
+
+        dls_filter = singular_values / (singular_values.square() + self.lambda_ ** 2)
+        delta_dls = (v @ (dls_filter.unsqueeze(-1) * projected)).squeeze(-1)
 
         singular = (cond > self.cond_N_threshold_).unsqueeze(-1)
         delta = torch.where(singular, delta_dls, delta_pinv)
@@ -377,12 +559,18 @@ class BatchedCcAffordancePlanner:
         def closure_rho(theta_p_vec, theta_s_vec):
             thetalist = torch.cat([theta_p_vec, theta_s_vec], dim=-1)
             tse = M.fkin_space(eye4, cc_slist, thetalist)  # M == identity (closed chain)
-            return (M.adjoint(tse) @ M.se3_to_vec(M.matrix_log6(M.trans_inv(tse))).unsqueeze(-1)).squeeze(-1)
+            # Ad_T Log(T^-1) = -Log(T): T commutes with its own logarithm.
+            # This is the same closure twist as the reference expression, but
+            # avoids two transform inverses, two 6x6 adjoints and two matmuls per
+            # Newton iteration.
+            return -M.se3_to_vec(M.matrix_log6(tse))
 
         rho = closure_rho(theta_p, theta_s)  # [B, 6]
         n_c = torch.cat([n_p_jac, n_s_jac], dim=-1)  # == jac, [B, 6, n]
-        pinv_nc = torch.linalg.pinv(n_c)  # [B, n, 6]
-        delta_theta = (pinv_nc @ rho.unsqueeze(-1)).squeeze(-1)  # [B, n]
+        if self.fast_solve_:
+            delta_theta = _regularized_pinv_apply(n_c, rho.unsqueeze(-1)).squeeze(-1)
+        else:
+            delta_theta = _svd_pinv_apply(n_c, rho.unsqueeze(-1)).squeeze(-1)
 
         n_p = n_p_jac.shape[-1]
         theta_p = theta_p + delta_theta[..., :n_p]
@@ -403,7 +591,7 @@ def compute_gripper_joint_trajectory(
     """Gripper value per trajectory point. Returns ``[B, trajectory_density]``."""
     n = int(trajectory_density)
     if gripper_goal_type == GripperGoalType.CONSTANT:
-        return gripper_end.expand(*gripper_end.shape, n)
+        return gripper_end.unsqueeze(-1).expand(*gripper_end.shape, n)
     idx = torch.arange(n, dtype=gripper_start.dtype, device=gripper_start.device)
     step = (gripper_end - gripper_start) / (n - 1)
     return gripper_start.unsqueeze(-1) + step.unsqueeze(-1) * idx  # [B, n]
@@ -425,8 +613,8 @@ def convert_cc_traj_to_robot_traj(
     gripper trajectory is supplied) — the auxiliary virtual/approach/affordance
     joints of the closed-chain state are dropped, as they are not robot joints.
 
-    ``cc_trajectory`` is expected to already be dense and carry-forward-cleaned
-    (see :meth:`BatchedCcAffordancePlanner.generate_motion_joint_trajectory`).
+    ``cc_trajectory`` is dense.  Points whose corresponding ``valid_mask`` entry
+    is false are the IK solver's final, non-converged candidates.
     """
     B, steps, n_cc = cc_trajectory.shape
     n_robot = int(start_joint_states.shape[-1])
@@ -469,9 +657,15 @@ class BatchedPlannerResult:
     joint_trajectory: torch.Tensor  # [B, T, n_robot (+1 gripper)] absolute robot trajectory
     valid_mask: torch.Tensor  # [B, m-1] bool — which IK steps converged
     success: torch.Tensor  # [B] bool
+    full_success: torch.Tensor  # [B] bool — every requested trajectory point converged
     description: list  # length-B list of TrajectoryDescription
     includes_gripper: bool = False
-    differential_trajectory: torch.Tensor = field(default=None)  # [B, m-1, n_cc] (debug/parity)
+    # [B] bool; the rectangular output may still have a batch-level gripper column.
+    gripper_active_mask: torch.Tensor = field(default=None)
+    # [B, m-1, n_cc], retained for diagnostics and parity testing.
+    differential_trajectory: torch.Tensor = field(default=None)
+    active_iterations: torch.Tensor = field(default=None)  # [B, m-1]
+    executed_iterations: torch.Tensor = field(default=None)  # [m-1]
     planning_time: datetime.timedelta = field(default_factory=datetime.timedelta)
 
 
@@ -493,11 +687,22 @@ class BatchedCcAffordancePlannerInterface:
         self.planner_config_ = planner_config
         self.planner_ = BatchedCcAffordancePlanner(planner_config)
 
-    def enable_fast_mode(self, compile: bool = True):
+    def enable_fast_mode(self, compile: bool = True, fast_solve: bool = False):
         """Enable the compiled fixed-iteration IK loop on the inner planner."""
-        self.planner_.enable_fast_mode(compile=compile)
+        self.planner_.enable_fast_mode(compile=compile, fast_solve=fast_solve)
         return self
 
+    def enable_chunked_early_stop(self, check_interval: int = 4, fast_solve: bool = False):
+        """Enable eager planning with amortised convergence checks."""
+        self.planner_.enable_chunked_early_stop(check_interval, fast_solve=fast_solve)
+        return self
+
+    def enable_fast_linear_solver(self, enabled: bool = True):
+        """Enable the regularised, SVD-free linear solver for throughput workloads."""
+        self.planner_.enable_fast_linear_solver(enabled)
+        return self
+
+    @torch.inference_mode()
     def generate_joint_trajectory(
         self,
         *,
@@ -512,7 +717,7 @@ class BatchedCcAffordancePlannerInterface:
         goal_ee_orientation: torch.Tensor | None = None,  # [B, k]
         canonical_pose: torch.Tensor | None = None,  # [B, 4, 4] (approach)
         gripper_state: torch.Tensor | None = None,  # [B]
-        goal_gripper: torch.Tensor | None = None,  # [B]; NaN entries => no gripper for that env
+        goal_gripper: torch.Tensor | None = None,  # [B]; NaN entries hold that env's start value
         gripper_goal_type: GripperGoalType = GripperGoalType.CONSTANT,
         update_method: UpdateMethod | None = None,
     ) -> BatchedPlannerResult:
@@ -525,19 +730,46 @@ class BatchedCcAffordancePlannerInterface:
         )
         B = joint_states.shape[0]
         device, dtype = joint_states.device, joint_states.dtype
+        if not dtype.is_floating_point:
+            raise ValueError("planner tensors must use a floating-point dtype")
+        for name, tensor in (
+            ("robot_slist", robot_slist),
+            ("robot_m", robot_m),
+            ("affordance_screw", affordance_screw),
+            ("goal_affordance", goal_affordance),
+        ):
+            if tensor.device != device or tensor.dtype != dtype:
+                raise ValueError(f"{name} must use the same device and dtype as joint_states")
+        if robot_slist.shape[-2] != 6 or robot_slist.shape[-1] != joint_states.shape[-1]:
+            raise ValueError("robot_slist must have shape [B, 6, n_robot] matching joint_states")
+        if robot_m.shape[-2:] != (4, 4):
+            raise ValueError("robot_m must have shape [B, 4, 4]")
+        if affordance_screw.shape[-1] != 6:
+            raise ValueError("affordance_screw must have shape [B, 6]")
 
         has_approach = motion_type == MotionType.APPROACH
-        ee_orient = (
-            goal_ee_orientation
-            if goal_ee_orientation is not None
-            else torch.zeros(B, 0, dtype=dtype, device=device)
-        )
+        ee_orient = torch.zeros(B, 0, dtype=dtype, device=device)
+        if goal_ee_orientation is not None:
+            ee_orient = _as_batched(goal_ee_orientation, B, 1, "goal_ee_orientation")
+            _require_compatible(ee_orient, joint_states, "goal_ee_orientation")
         k = ee_orient.shape[-1]
+        n_virtual = (
+            0
+            if vir_screw_order == VirtualScrewOrder.NONE
+            else len(_VIR_SCREW_AXES[vir_screw_order])
+        )
+        if k not in (0, n_virtual):
+            raise ValueError(
+                "goal_ee_orientation must either be empty (virtual joints remain free) or contain "
+                f"one goal per virtual screw ({n_virtual} for {vir_screw_order.name}); got {k}"
+            )
 
         # ---- compose closed-chain model ----
         if has_approach:
             if canonical_pose is None:
                 raise ValueError("canonical_pose is required for APPROACH motion.")
+            canonical_pose = _as_batched(canonical_pose, B, 2, "canonical_pose")
+            _require_compatible(canonical_pose, joint_states, "canonical_pose")
             cc_slist, approach_limit = compose_cc_model_slist(
                 robot_slist, robot_m, joint_states, affordance_screw, canonical_pose, vir_screw_order
             )
@@ -561,15 +793,25 @@ class BatchedCcAffordancePlannerInterface:
         # ---- gripper trajectory (optional) ----
         gripper_traj = None
         includes_gripper = False
-        if goal_gripper is not None and not torch.isnan(goal_gripper).all():
-            includes_gripper = True
+        gripper_active = torch.zeros(B, dtype=torch.bool, device=device)
+        if goal_gripper is not None:
+            goal_gripper = _as_batched(goal_gripper, B, 0, "goal_gripper")
+            _require_compatible(goal_gripper, joint_states, "goal_gripper")
+            gripper_active = ~torch.isnan(goal_gripper)
+        if bool(gripper_active.any()):
+            includes_gripper = True  # rectangular output has one shared gripper column
             g_start = (
-                gripper_state
+                _as_batched(gripper_state, B, 0, "gripper_state")
                 if gripper_state is not None
                 else torch.zeros(B, dtype=dtype, device=device)
             )
+            _require_compatible(g_start, joint_states, "gripper_state")
+            if bool((gripper_active & torch.isnan(g_start)).any()):
+                raise ValueError("gripper_state must be finite where goal_gripper is specified")
+            g_start = torch.nan_to_num(g_start, nan=0.0)
+            effective_goal = torch.where(gripper_active, goal_gripper, g_start)
             gripper_traj = compute_gripper_joint_trajectory(
-                gripper_goal_type, g_start, goal_gripper, int(trajectory_density)
+                gripper_goal_type, g_start, effective_goal, int(trajectory_density)
             )
 
         robot_traj = convert_cc_traj_to_robot_traj(
@@ -577,15 +819,20 @@ class BatchedCcAffordancePlannerInterface:
         )
 
         success = motion.description_codes > 0
+        full_success = motion.description_codes == _DESC_CODE[TrajectoryDescription.FULL]
         description = [_DESC_FROM_CODE[int(c)] for c in motion.description_codes.tolist()]
 
         return BatchedPlannerResult(
             joint_trajectory=robot_traj,
             valid_mask=motion.valid_mask,
             success=success,
+            full_success=full_success,
             description=description,
             includes_gripper=includes_gripper,
+            gripper_active_mask=gripper_active,
             differential_trajectory=motion.joint_trajectory,
+            active_iterations=motion.active_iterations,
+            executed_iterations=motion.executed_iterations,
             planning_time=datetime.timedelta(microseconds=int((time.perf_counter() - start) * 1e6)),
         )
 
@@ -595,16 +842,40 @@ def _broadcast_batch(*tensors):
 
     ``tensors`` is ``(robot_slist, robot_m, joint_states, affordance_screw,
     goal_affordance)``. The batch size ``B`` is taken from ``joint_states`` (which
-    the caller always supplies as ``[B, n_robot]``); any input whose leading dim is
-    not ``B`` is treated as shared across the batch and expanded.
+    the caller may also supply as ``[n_robot]``). Rank distinguishes shared from
+    batched inputs, avoiding ambiguity when an unbatched dimension happens to
+    equal ``B``.
     """
-    ref_B = tensors[2].shape[0]
-    expanded = []
-    for t in tensors:
-        if t.shape[0] != ref_B:
-            t = t.unsqueeze(0).expand(ref_B, *t.shape)
-        expanded.append(t)
-    return expanded
+    robot_slist, robot_m, joint_states, affordance_screw, goal_affordance = tensors
+    if joint_states.ndim == 1:
+        joint_states = joint_states.unsqueeze(0)
+    elif joint_states.ndim != 2:
+        raise ValueError("joint_states must have shape [n_robot] or [B, n_robot]")
+    ref_B = joint_states.shape[0]
+    return [
+        _as_batched(robot_slist, ref_B, 2, "robot_slist"),
+        _as_batched(robot_m, ref_B, 2, "robot_m"),
+        joint_states,
+        _as_batched(affordance_screw, ref_B, 1, "affordance_screw"),
+        _as_batched(goal_affordance, ref_B, 0, "goal_affordance"),
+    ]
+
+
+def _as_batched(tensor: torch.Tensor, batch_size: int, unbatched_ndim: int, name: str) -> torch.Tensor:
+    """Normalise one tensor using rank, rather than an ambiguous leading size."""
+    if tensor.ndim == unbatched_ndim:
+        return tensor.unsqueeze(0).expand(batch_size, *tensor.shape)
+    if tensor.ndim == unbatched_ndim + 1 and tensor.shape[0] == batch_size:
+        return tensor
+    raise ValueError(
+        f"{name} must be unbatched rank {unbatched_ndim} or batched with leading size {batch_size}; "
+        f"got shape {tuple(tensor.shape)}"
+    )
+
+
+def _require_compatible(tensor: torch.Tensor, reference: torch.Tensor, name: str) -> None:
+    if tensor.device != reference.device or tensor.dtype != reference.dtype:
+        raise ValueError(f"{name} must use the same device and dtype as joint_states")
 
 
 def plan_batch(*args, **kwargs):

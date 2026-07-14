@@ -138,22 +138,27 @@ def so3_log_map(rot: torch.Tensor, eps: float = _EPS) -> torch.Tensor:
     """Rotation vector (axis * angle) from an SO(3) matrix. ``[..., 3, 3] -> [..., 3]``.
 
     General branch: ``theta / (2 sin theta) * vee(R - R^T)``.
-    Near ``theta ~ 0`` the general branch already yields ~0 (theta -> 0), so no
-    explicit case is needed. Near ``theta ~ pi`` the matrix is symmetric (so the
-    anti-symmetric part vanishes) and the axis is recovered from the diagonal, as
-    in the Modern Robotics closed-form: the candidate with the largest
-    ``1 + R_kk`` is selected element-wise across the batch.
+    Near ``theta ~ 0`` the first-order ``vee / 2`` limit avoids an ill-conditioned
+    division. Near ``theta ~ pi`` the matrix is symmetric (so the anti-symmetric
+    part vanishes) and the axis is recovered from the diagonal, as in the Modern
+    Robotics closed-form: the candidate with the largest ``1 + R_kk`` is selected
+    element-wise across the batch.
     """
-    trace = rot[..., 0, 0] + rot[..., 1, 1] + rot[..., 2, 2]
-    cos = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0)
-    theta = torch.acos(cos)  # [...]
-    sin = torch.sqrt((1.0 - cos * cos).clamp(min=0.0))  # [...]
-
     rm = rot - rot.transpose(-2, -1)
     vee = torch.stack([rm[..., 2, 1], rm[..., 0, 2], rm[..., 1, 0]], dim=-1)  # [..., 3]
 
+    trace = rot[..., 0, 0] + rot[..., 1, 1] + rot[..., 2, 2]
+    cos = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0)
+    # ``acos(cos)`` loses all small-angle resolution when cos rounds to one.
+    # The skew part is first-order in theta, so atan2(||vee||/2, cos) remains
+    # accurate in float32 down to the closure tolerances used by the planner.
+    sin = 0.5 * vee.norm(dim=-1)
+    theta = torch.atan2(sin, cos)  # [...]
+
     safe_sin = torch.where(sin > eps, sin, torch.ones_like(sin))
     log_general = (theta / (2.0 * safe_sin)).unsqueeze(-1) * vee  # [..., 3]
+    # lim(theta -> 0) theta/(2 sin(theta)) * vee = vee/2.
+    log_near_zero = 0.5 * vee
 
     # ---- near pi: recover the unit axis from the diagonal, batch-wise ----
     diag = torch.diagonal(rot, dim1=-2, dim2=-1)  # [..., 3]
@@ -174,8 +179,13 @@ def so3_log_map(rot: torch.Tensor, eps: float = _EPS) -> torch.Tensor:
     )
     log_pi = theta.unsqueeze(-1) * omg  # theta ~ pi
 
-    near_pi = (sin <= eps) & (theta > eps)
-    return torch.where(near_pi.unsqueeze(-1), log_pi, log_general)
+    near_pi = (sin <= eps) & (cos < 0.0)
+    near_zero = (sin <= eps) & ~near_pi
+    return torch.where(
+        near_pi.unsqueeze(-1),
+        log_pi,
+        torch.where(near_zero.unsqueeze(-1), log_near_zero, log_general),
+    )
 
 
 def matrix_log6(transform: torch.Tensor, eps: float = _EPS) -> torch.Tensor:
@@ -186,15 +196,23 @@ def matrix_log6(transform: torch.Tensor, eps: float = _EPS) -> torch.Tensor:
     omgvec = so3_log_map(rot, eps)  # [..., 3]
     so3mat = vec_to_so3(omgvec)  # [..., 3, 3]
 
-    trace = rot[..., 0, 0] + rot[..., 1, 1] + rot[..., 2, 2]
-    cos = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0)
-    theta = torch.acos(cos)  # [...]
+    # The norm of the already robust rotation vector is the rotation angle.
+    # Recomputing it with acos(trace) reintroduces float32 quantisation near I.
+    theta = omgvec.norm(dim=-1)  # [...]
     near_zero = theta.abs() < eps  # [...]
 
     eye3 = torch.eye(3, dtype=transform.dtype, device=transform.device)
     eye3 = eye3.expand(*rot.shape[:-2], 3, 3)
     safe_theta = torch.where(near_zero, torch.ones_like(theta), theta)
-    coef = (1.0 / safe_theta - 1.0 / (2.0 * torch.tan(safe_theta / 2.0))) / safe_theta  # [...]
+    theta2 = safe_theta.square()
+    # G^-1 coefficient.  The direct expression subtracts two O(1/theta)
+    # values and is catastrophically unstable in float32 for small rotations.
+    # Its Taylor series is accurate throughout this small-angle branch.
+    coef_series = 1.0 / 12.0 + theta2 / 720.0 + theta2.square() / 30240.0
+    coef_general = (
+        1.0 - 0.5 * safe_theta / torch.tan(0.5 * safe_theta)
+    ) / theta2
+    coef = torch.where(safe_theta < 0.05, coef_series, coef_general)  # [...]
 
     omg2 = so3mat @ so3mat
     p_general = eye3 - 0.5 * so3mat + coef.unsqueeze(-1).unsqueeze(-1) * omg2

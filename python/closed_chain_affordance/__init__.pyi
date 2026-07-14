@@ -5,6 +5,7 @@ from enum import Enum
 from typing import overload
 
 import numpy as np
+import torch
 from numpy.typing import NDArray
 
 
@@ -194,5 +195,82 @@ def build_robot_description_from_urdf(
     joint_states: NDArray[np.float64] | None = ...,
     gripper_state: float = ...,
 ) -> RobotDescription: ...
+
+
+class BatchedMotionResult:
+    joint_trajectory: torch.Tensor
+    valid_mask: torch.Tensor
+    description_codes: torch.Tensor
+    active_iterations: torch.Tensor
+    executed_iterations: torch.Tensor
+    update_trail: str
+
+
+class BatchedPlannerResult:
+    joint_trajectory: torch.Tensor
+    valid_mask: torch.Tensor
+    success: torch.Tensor
+    full_success: torch.Tensor
+    description: list[TrajectoryDescription]
+    includes_gripper: bool
+    gripper_active_mask: torch.Tensor
+    differential_trajectory: torch.Tensor
+    active_iterations: torch.Tensor
+    executed_iterations: torch.Tensor
+    planning_time: timedelta
+
+
+class BatchedCcAffordancePlanner:
+    def __init__(self, planner_config: PlannerConfig | None = ...) -> None: ...
+    def enable_fast_mode(
+        self, compile: bool = ..., fast_solve: bool = ...
+    ) -> BatchedCcAffordancePlanner: ...
+    def enable_chunked_early_stop(
+        self, check_interval: int = ..., fast_solve: bool = ...
+    ) -> BatchedCcAffordancePlanner: ...
+    def enable_fast_linear_solver(self, enabled: bool = ...) -> BatchedCcAffordancePlanner: ...
+    def generate_motion_joint_trajectory(
+        self,
+        cc_slist: torch.Tensor,
+        theta_sdf: torch.Tensor,
+        task_offset_tau: int,
+        stepper_max_itr_m: int,
+        has_approach: bool = ...,
+        update_method: UpdateMethod | None = ...,
+    ) -> BatchedMotionResult: ...
+
+
+class BatchedCcAffordancePlannerInterface:
+    def __init__(self, planner_config: PlannerConfig | None = ...) -> None: ...
+    def enable_fast_mode(
+        self, compile: bool = ..., fast_solve: bool = ...
+    ) -> BatchedCcAffordancePlannerInterface: ...
+    def enable_chunked_early_stop(
+        self, check_interval: int = ..., fast_solve: bool = ...
+    ) -> BatchedCcAffordancePlannerInterface: ...
+    def enable_fast_linear_solver(
+        self, enabled: bool = ...
+    ) -> BatchedCcAffordancePlannerInterface: ...
+    def generate_joint_trajectory(
+        self,
+        *,
+        robot_slist: torch.Tensor,
+        robot_m: torch.Tensor,
+        joint_states: torch.Tensor,
+        motion_type: MotionType,
+        affordance_screw: torch.Tensor,
+        goal_affordance: torch.Tensor,
+        trajectory_density: int,
+        vir_screw_order: VirtualScrewOrder = ...,
+        goal_ee_orientation: torch.Tensor | None = ...,
+        canonical_pose: torch.Tensor | None = ...,
+        gripper_state: torch.Tensor | None = ...,
+        goal_gripper: torch.Tensor | None = ...,
+        gripper_goal_type: GripperGoalType = ...,
+        update_method: UpdateMethod | None = ...,
+    ) -> BatchedPlannerResult: ...
+
+
+def plan_batch(*args, **kwargs) -> BatchedPlannerResult: ...
 
 __version__: str

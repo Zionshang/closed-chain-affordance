@@ -30,7 +30,7 @@ _VIR_SCREW_AXES = {
     VirtualScrewOrder.ZXY: np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]),
     VirtualScrewOrder.XY: np.array([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]),
     VirtualScrewOrder.YZ: np.array([[0.0, 1.0], [1.0, 0.0], [0.0, 0.0]]),
-    VirtualScrewOrder.ZX: np.array([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0]]),
+    VirtualScrewOrder.ZX: np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 0.0]]),
 }
 
 _AXIS_VECTORS = {
