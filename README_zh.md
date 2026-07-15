@@ -1,182 +1,143 @@
-# Torch 批量 CCA 规划器
+# cca-planner
 
-本项目以原始 C++ CCA 实现为基准，提供 NumPy 单任务实现和 Torch 批量实现。Torch 版本使用同一套闭链任务描述和 IK 算法，只增加批量 Tensor 输入、GPU 执行和批量诊断信息。
+`cca-planner` 是一个完全基于 Torch 的批量闭链可供性轨迹规划包。一次调用可以输入
+`B` 组不同的机器人状态、目标和物体位置，并直接返回适合 GPU 仿真及强化学习使用的
+批量轨迹 Tensor。
+
+## 安装
+
+在仓库根目录执行：
 
 ```bash
 pip install -e .
 ```
 
-## 最小示例
+如需运行带 Viser 可视化的阀门 Demo：
+
+```bash
+pip install -e ".[viewer]"
+```
+
+安装后的导入名是：
 
 ```python
-import numpy as np
+import cca_planner as cca
+```
+
+## 最小示例：批量旋转阀门
+
+```python
+from pathlib import Path
+
 import torch
-import closed_chain_affordance as cca
+import cca_planner as cca
 
-# 一次并行规划 128 个阀门任务；B 是 batch size，不是机器人关节数。
-B = 128
-
-# 所有输入 Tensor 必须位于同一设备并使用同一种 dtype。
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+dtype = torch.float32
+B = 64  # 并行环境数；以下每个环境都可以有不同的阀门和目标
 
-# 从 URDF 和配置文件读取机器人运动学模型。
-# robot 包含：
-#   robot.slist        各机器人关节在零位时的空间螺旋轴，形状 [6, n_robot]
-#   robot.M            所有关节为 0 时，TCP 相对机器人基座的位姿，形状 [4, 4]
-#   robot.joint_states 当前机器人关节角，形状 [n_robot]
-robot = cca.build_robot_description_from_urdf(
-    "assets/robot/x5/urdf/x5.urdf",
-    "python/x5_urdf_config.yaml",
-    joint_states=np.zeros(6),
-)
-
-# q[b] 是第 b 个环境的机器人起始关节角。本例让 128 台机器人都从零位开始。
-q = torch.tensor(robot.joint_states, device=device, dtype=torch.float32)
-q = q.expand(B, -1).clone()                                         # [B, n_robot]
-
-# slist 的每一列是一个 6 维关节 screw [角速度部分; 线速度部分]。
-# 它描述“每个机器人关节绕哪根轴运动”，不是轨迹，也不是当前姿态下的 Jacobian。
-# 这里所有环境使用同一种机器人，所以直接共享一份 [6, n_robot] 模型即可。
-slist = torch.tensor(robot.slist, device=device, dtype=q.dtype)       # [6, n_robot]
-
-# home 是机器人零关节角时的 TCP 齐次变换矩阵：前三列是方向，最后一列是位置。
-# 它同样由所有环境共享；规划器会结合 home、slist 和 q 计算当前 TCP 位姿。
-home = torch.tensor(robot.M, device=device, dtype=q.dtype)           # [4, 4]
-
-# axis[b] 是第 b 个阀门的旋转轴方向，必须是单位向量。
-# [1, 0, 0] 表示阀门绕机器人基座坐标系的 +x 方向旋转。
-axis = torch.tensor([1.0, 0.0, 0.0], device=device, dtype=q.dtype)
-axis = axis.expand(B, -1)                                           # [B, 3]
-
-# TCP（Tool Center Point）是机械臂末端实际执行任务的参考点。
-# fkin_space 用前向运动学计算当前 q 下的 TCP 位姿；[:3, 3] 取出其 xyz 位置。
-tcp = torch.tensor(
-    cca.fkin_space(robot.M, robot.slist, robot.joint_states)[:3, 3],
+# 从 URDF 构造规划器所需的机器人运动学描述。
+robot = cca.load_robot_from_urdf(
+    Path("assets/robot/x5/urdf/x5.urdf"),
+    Path("examples/x5_urdf_config.yaml"),
+    dtype=dtype,
     device=device,
-    dtype=q.dtype,
-)                                                                      # [3]
+)
 
-# radii[b] 是第 b 个阀门的物理半径，单位为米；本例从 5 cm 到 8.5 cm。
-radii = torch.linspace(0.05, 0.085, B, device=device, dtype=q.dtype) # [B]
+# slist：空间螺旋轴矩阵，形状 [6, n]。每一列描述一个机器人关节的
+# 旋转/平移轴及其空间位置，规划器用它计算正运动学和雅可比矩阵。
+slist = robot.slist
 
-# grasp_direction 表示从阀门圆心指向抓取点的方向。
-# 本例把当前 TCP 当作阀门顶部的抓取点，因此满足：
-#   TCP = valve_center + radius * grasp_direction
-grasp_direction = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=q.dtype)
+# M（这里命名为 home_pose）：所有关节为零时，TCP（工具中心点/末端）
+# 相对机器人基座的 4x4 齐次变换矩阵。
+home_pose = robot.M
 
-# centres[b] 是第 b 个阀门的圆心，也是阀门旋转轴经过的空间点。
-# 由上面的几何关系反推出：valve_center = TCP - radius * grasp_direction。
-centres = tcp - radii[:, None] * grasp_direction                     # [B, 3]
+# q0：每个环境的初始关节角，形状 [B, n]。这里先复制相同零位；在 Isaac Lab
+# 中可直接传入每个环境当前的机器人关节位置。
+q0 = robot.joint_states.expand(B, -1).clone()
 
-# 纯旋转任务的 6 维 screw 为 [w; c × w]：
-#   w = axis          阀门转轴方向
-#   c = centres       转轴经过的点
-# screws[b] 因而完整描述“第 b 个阀门绕空间中的哪根轴旋转”。
-screws = torch.cat([axis, torch.cross(centres, axis, dim=-1)], dim=-1)
+# tcp：由 slist、M 和 q0 算出的当前末端位置，形状 [B, 3]。
+tcp = cca.fkin_space(home_pose, slist, q0)[:, :3, 3]
 
-# goals[b] 是第 b 个阀门希望转过的角度，单位为弧度；这里为 60° 到 180°。
-goals = torch.linspace(np.pi / 3, np.pi, B, device=device, dtype=q.dtype)
+# axis：每个阀门的转轴方向，形状 [B, 3]；这里都绕基座坐标系 +x 轴旋转。
+axis = torch.tensor([1., 0., 0.], device=device, dtype=dtype).expand(B, -1)
 
-# 高层 Torch 批量接口：内部会构造闭链模型并并行求解 B 条关节轨迹。
-# 默认启用 fast mode 和正则化线性求解，并关闭 early stop；torch.compile 单独选择。
-planner = cca.BatchedCcAffordancePlannerInterface()
+# radii：每个阀门的半径，形状 [B]。使用不同半径演示异构批输入。
+radii = torch.linspace(0.05, 0.085, B, device=device, dtype=dtype)
+
+# centres：阀门中心，形状 [B, 3]。假定 TCP 当前位于阀门上沿，因此阀门中心
+# 等于 TCP 沿 -z 方向移动一个半径。若阀门离末端较远，应先规划 APPROACH。
+grasp_direction = torch.tensor([0., 0., 1.], device=device, dtype=dtype)
+centres = tcp - radii[:, None] * grasp_direction
+
+# valve_screws：把“绕 axis、经过 centres 旋转”编码为 6 维可供性螺旋轴。
+# 这就是闭链任务中物体一侧的运动约束。
+valve_screws = cca.get_screw(cca.ScrewType.ROTATION, axis, centres)
+
+# turn_angles：每个环境期望转动的弧度，形状 [B]，可以全部不同。
+turn_angles = torch.linspace(0.6, 1.2, B, device=device, dtype=dtype)
+
+# 收敛参数集中在 PlannerConfig；这里只覆盖最大 IK 迭代次数。
+config = cca.PlannerConfig(ik_max_itr=50)
+planner = cca.PlannerInterface(
+    config,
+    fast_mode=True,           # 固定迭代次数、用 mask 冻结已收敛环境；默认开启
+    compile=False,            # 是否 torch.compile；默认关闭，需按实际批规模测试收益
+    fast_linear_solver=True,  # 用正则化法方程代替两处 SVD；默认开启
+)
+
 result = planner.generate_joint_trajectory(
-    robot_slist=slist,                         # 机器人关节 screw 模型
-    robot_m=home,                              # 机器人零位时的 TCP 位姿
-    joint_states=q,                            # 每个环境的起始关节角
-    motion_type=cca.MotionType.AFFORDANCE,     # 已接触阀门，规划沿阀门转轴运动
-    affordance_screw=screws,                   # 每个阀门的旋转 screw
-    goal_affordance=goals,                     # 每个阀门的目标转角
-    trajectory_density=12,                     # 每条输出轨迹包含 12 个关节状态
-    vir_screw_order=cca.VirtualScrewOrder.XYZ, # 允许三个虚拟末端姿态自由度
+    robot_slist=slist,             # [6, n] 可由所有环境共享，也可传 [B, 6, n]
+    robot_m=home_pose,             # 零位 TCP 位姿：[4, 4] 或 [B, 4, 4]
+    joint_states=q0,               # 每个环境的初始关节角：[B, n]
+    motion_type=cca.MotionType.AFFORDANCE,
+    affordance_screw=valve_screws, # 每个阀门的 6 维运动螺旋轴：[B, 6]
+    goal_affordance=turn_angles,   # 每个阀门的目标转角：[B]
+    trajectory_density=12,         # 输出点数，包含初始状态，因此内部求解 11 个目标点
+    vir_screw_order=cca.VirtualScrewOrder.XYZ, # 允许末端姿态通过 XYZ 虚拟关节调整
 )
 
-# trajectory[b, t] 是环境 b 在轨迹点 t 的绝对机器人关节角。
-trajectory = result.joint_trajectory                  # [B, 12, n_robot]
-
-# full_success[b] 表示环境 b 的所有 11 个 IK 步骤是否全部收敛。
-full_success = result.full_success                     # [B]
-
-# valid_mask[b, t] 可进一步查看每一个离散 IK 步骤是否收敛。
-valid_mask = result.valid_mask                         # [B, 11]
+trajectory = result.joint_trajectory  # [B, 12, n]，绝对机器人关节轨迹
+full_success = result.full_success    # [B]，该环境所有轨迹点是否都收敛
+valid_steps = result.valid_mask       # [B, 11]，逐目标点的收敛状态
 ```
 
-这个例子从 `AFFORDANCE` 阶段开始，因此假设 TCP 已经位于阀门边缘并与阀门建立了接触。阀门离机械臂较远时，应先规划 `APPROACH`；两阶段示例见 `python/demo_valve_batch.py`。
+## 收敛与 Torch 执行参数
 
-几个最容易混淆的名字：
+`PlannerConfig` 是任务无关的统一收敛配置：
 
-| 名字 | 物理含义 | 是否随批次变化 |
-|---|---|---|
-| `slist` | 机器人自身各关节的 6 维空间螺旋轴，决定机器人运动学结构。 | 本例共享，也可传 `[B,6,n_robot]`。 |
-| `home` / `robot.M` | 机器人零位时 TCP 相对基座的完整位姿。 | 本例共享，也可传 `[B,4,4]`。 |
-| `tcp` | 当前关节角下末端工具中心点的位置，不是阀门圆心。 | 本例所有环境相同。 |
-| `axis` | 阀门的旋转轴方向，例如 `[1,0,0]` 表示沿基座 `+x`。 | 可以为每个阀门分别指定。 |
-| `radii` | 阀门半径；用于由抓取点反推阀门圆心，不直接传给规划器。 | 每个阀门不同。 |
-| `centres` | 阀门圆心，同时是旋转轴经过的一点。 | 每个阀门不同。 |
-| `screws` | 由 `axis` 和 `centres` 合成的完整阀门旋转约束。 | 每个阀门不同。 |
-| `goals` | 每个阀门最终需要旋转的角度。 | 每个阀门不同。 |
+- `accuracy=0.1`：离散目标的相对容差。
+- `closure_err_threshold_ang=1e-4`：闭链旋转残差阈值。
+- `closure_err_threshold_lin=1e-5`：闭链平移残差阈值，单位为米。
+- `ik_max_itr=200`：每个轨迹点的最大 IK 迭代次数。
+- `update_method=UpdateMethod.BEST`：比较逆法和转置法并逐环境选较优结果。
 
-## Torch 特有公开接口
+下面三个构造参数是 Torch 批执行特有的实现策略，不改变 APPROACH 与
+AFFORDANCE 的统一任务描述：
 
-| 接口 | 功能 |
-|---|---|
-| `BatchedCcAffordancePlannerInterface` | 推荐的高层批量接口；接收机器人状态、任务和目标 Tensor，返回绝对关节轨迹。 |
-| `BatchedCcAffordancePlanner` | 低层批量 IK；输入已经组合好的闭链 screw matrix 和 secondary goals。 |
-| `plan_batch(...)` | 使用默认 `PlannerConfig` 创建高层接口并规划一次。 |
-| `compose_cc_model_slist_batched(...)` | 批量构造闭链模型；高级用法。 |
-| `BatchedPlannerResult` | 高层批量规划结果。 |
-| `BatchedMotionResult` | 低层闭链差分轨迹和求解诊断。 |
+- `fast_mode=True`：默认开启固定次数迭代，并用布尔 mask 冻结已收敛环境；因此默认
+  **不 early stop**，可避免 GPU 每轮同步到 CPU。
+- `fast_linear_solver=True`：默认使用正则化法方程，减少小矩阵 SVD 的高额调度开销。
+- `compile=False`：默认不调用 `torch.compile`。在 Isaac Lab 中，只有批大小、自由度和
+  轨迹密度较稳定且规划器长期复用时，编译成本才更可能被摊薄。
 
-原有 `MotionType`、`VirtualScrewOrder`、`UpdateMethod` 和 `PlannerConfig` 与 C++/NumPy 共用，不是 Torch 专属语义。
+若确实希望提前终止，可在首次规划前调用
+`planner.enable_chunked_early_stop(check_interval=4)`。失败时返回张量中仍保留每个目标点
+的最后候选解，是否真正收敛必须以 `valid_mask` / `full_success` 为准。
 
-## Torch 特有输入规则
+## 示例
 
-以下参数可以逐环境不同：
+- [`examples/demo_valve.py`](examples/demo_valve.py)：先接近随机化的阀门抓取点，
+  再沿旋转螺旋轴扭转阀门。
+- [`examples/demo_drawer.py`](examples/demo_drawer.py)：先接近随机化的抽屉把手，
+  再沿平移螺旋轴将抽屉拉开。
 
-| 参数 | 形状 | 含义 |
-|---|---|---|
-| `joint_states` | `[B, n]` | 每个环境的当前关节角。 |
-| `affordance_screw` | `[B, 6]` | 每个环境的任务 screw。 |
-| `goal_affordance` | `[B]` | 每个环境的任务目标。 |
-| `canonical_pose` | `[B, 4, 4]` | `APPROACH` 的目标位姿。 |
-| `goal_ee_orientation` | `[B, k]` | 可选虚拟 EE 关节目标。 |
-| `gripper_state` / `goal_gripper` | `[B]` | 可选夹爪状态和目标；`goal_gripper=NaN` 表示该环境保持初值。 |
+每个脚本都独立包含完整的最小规划流程；只有机器人网格、物体几何、轨迹着色和动画
+共用 [`ViserVisualizer`](examples/visualizer.py)。
 
-`robot_slist` 和 `robot_m` 可传共享的 `[6,n]`、`[4,4]`，也可传批量形式。所有 Tensor 必须使用相同 device 和 dtype。
-
-一个批次内必须共享 `motion_type`、`trajectory_density`、`vir_screw_order`、`gripper_goal_type` 和 `update_method`。
-
-## Torch 特有结果字段
-
-| 字段 | 功能 |
-|---|---|
-| `joint_trajectory [B,T,n]` | 定长绝对关节轨迹；失败点保留该次 IK 的最后候选解，必须结合 `valid_mask` 使用。 |
-| `valid_mask [B,T-1]` | 每个离散 IK 点是否收敛。 |
-| `success [B]` | 至少一个轨迹点成功。 |
-| `full_success [B]` | 所有轨迹点都成功。 |
-| `differential_trajectory` | 闭链内部差分轨迹，用于诊断。 |
-| `active_iterations [B,T-1]` | 每个环境、每个轨迹点实际参与的 IK 迭代数。 |
-| `executed_iterations [T-1]` | 每个轨迹点整个批次实际执行的迭代数。 |
-| `gripper_active_mask [B]` | 哪些环境启用了夹爪目标。 |
-
-## Torch 特有执行开关
-
-默认配置面向批量吞吐：启用固定迭代 `fast_mode`、启用正则化线性求解，并关闭 `early_stop`。已经收敛的环境仍会由 mask 冻结，但整个批次固定执行 `ik_max_itr` 次。`torch.compile` 默认关闭，因为首次编译成本可能远大于小矩阵规划本身；需要重复复用同一形状时可显式开启。
-
-| 方法 | 功能 |
-|---|---|
-| `enable_fast_linear_solver(enabled=True)` | 开关正则化法方程；默认开启。它替代两处 SVD，通常更快，但属于近似数值后端。 |
-| `enable_fast_mode(compile=True, fast_solve=True)` | 固定执行 `ik_max_itr` 并关闭 early stop；默认已处于 fast mode，但构造器默认 `compile=False`。显式调用本方法会请求懒编译。 |
-| `enable_chunked_early_stop(check_interval=4, fast_solve=True)` | 在第一次规划前切回 early stop；每若干次迭代检查一次批量收敛。 |
-
-这些开关只改变 Torch 的数值执行方式，不改变 APPROACH、AFFORDANCE 或闭链任务定义。
-
-需要与 C++/NumPy 做精确数值对照时，在构造时显式使用 reference 配置：
-
-```python
-planner = cca.BatchedCcAffordancePlannerInterface(
-    fast_mode=False,            # 恢复逐迭代 early stop
-    compile=False,              # 不使用 torch.compile
-    fast_linear_solver=False,   # 恢复 SVD 伪逆
-)
+```bash
+python examples/demo_valve.py
+python examples/demo_drawer.py
 ```
+
+先执行 `pip install -e ".[dev]"` 安装测试依赖，再运行 `pytest`。

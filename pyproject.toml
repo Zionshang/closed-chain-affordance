@@ -3,22 +3,21 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "closed-chain-affordance"
-version = "0.1.0"
-description = "Pure-Python implementation of the Closed-Chain Affordance planning framework"
+name = "cca-planner"
+version = "0.2.0"
+description = "Torch-native batched Closed-Chain Affordance trajectory planner"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
-    "numpy>=1.23",
-    "scipy>=1.10",
     "pyyaml>=6.0",
-    "torch==2.10.0",
-    "torchvision==0.25.0"
+    "torch>=2.5",
 ]
 
 [project.optional-dependencies]
 viewer = [
+    "numpy>=1.23",
+    "scipy>=1.10",
     "viser",
     "yourdfpy",
     "trimesh",
@@ -27,17 +26,11 @@ dev = [
     "pytest>=7",
 ]
 
-[tool.setuptools]
-packages = ["closed_chain_affordance"]
-package-dir = { "" = "python" }
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools.package-data]
-closed_chain_affordance = ["py.typed", "*.pyi"]
+cca_planner = ["py.typed"]
 
-# NOTE: The original C++ / pybind11 implementation still lives under
-# affordance_util/, cc_affordance_planner/, and bindings/. It is no longer built
-# by `pip install .` (the pure-Python package above is the default), but it can
-# still be built as a reference for the equivalence tests under tests/ with:
-#   cmake -S . -B build -DPython3_EXECUTABLE=$(which python)
-#   cmake --build build -j4
-# then move python/closed_chain_affordance.so into tests/_cpp_ref/.
+[tool.pytest.ini_options]
+testpaths = ["tests"]

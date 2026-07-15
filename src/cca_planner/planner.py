@@ -1,10 +1,8 @@
-"""Batched closed-chain affordance planner (PyTorch, GPU-ready).
+"""Batched closed-chain affordance planner implemented entirely with Torch.
 
-A tensor reimplementation of :mod:`closed_chain_affordance.planner` /
-:mod:`closed_chain_affordance.interface` that plans for a whole batch at once:
-one call takes ``[B, ...]`` inputs (e.g. one robot configuration + one task goal
-per environment) and returns ``[B, ...]`` trajectories. This is the shape Isaac
-Lab asks for, where ``B`` is the number of parallel environments.
+One call takes ``[B, ...]`` inputs (one robot configuration and task goal per
+environment) and returns ``[B, ...]`` trajectories. This is the layout used by
+Isaac Lab, where ``B`` is the number of parallel environments.
 
 Algorithmic mapping (see the design discussion for detail):
 
@@ -12,9 +10,8 @@ Algorithmic mapping (see the design discussion for detail):
   Exact mode checks for whole-batch convergence every iteration; optional
   chunked and compiled fixed-iteration modes expose different synchronisation /
   empty-work trade-offs.
-* The conditional DLS branch in the inverse update is evaluated **branch-free**
-  via ``torch.where`` (both branches computed, selected element-wise), so it
-  reproduces the reference numerics exactly rather than always damping.
+* The conditional DLS branch in the inverse update is evaluated branch-free via
+  ``torch.where`` (both branches are computed and selected element-wise).
 * Pseudoinverse products are applied directly. The default throughput mode uses
   regularised normal equations for two applications; reference mode restores
   the thin-SVD/rank-threshold path. One-row updates (the common affordance-only
@@ -33,7 +30,8 @@ from dataclasses import dataclass, field
 
 import torch
 
-from . import batched_math as M
+from . import math as M
+from .config import PlannerConfig
 from .enums import (
     GripperGoalType,
     MotionType,
@@ -60,7 +58,7 @@ _VIR_SCREW_AXES = {
     VirtualScrewOrder.YZX: ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
     VirtualScrewOrder.ZXY: ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
     VirtualScrewOrder.XY: ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
-    # Exact column order from the C++ get_vir_screw_axes implementation.
+    # Established CCA column ordering.
     VirtualScrewOrder.YZ: ((0.0, 1.0, 0.0), (1.0, 0.0, 0.0)),
     VirtualScrewOrder.ZX: ((0.0, 1.0, 1.0), (0.0, 0.0, 0.0)),
 }
@@ -71,7 +69,7 @@ def _svd_pinv_apply(matrix: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
 
     This preserves the SVD/rank-threshold semantics of ``torch.linalg.pinv``
     while avoiding construction of the full pseudoinverse tensor.  It is used
-    by the parity-oriented mode; throughput mode may use regularised normal
+    by the reference numerical mode; throughput mode may use regularised normal
     equations instead.
     """
     u, singular_values, vh = torch.linalg.svd(matrix, full_matrices=False)
@@ -92,8 +90,7 @@ def _regularized_pinv_apply(matrix: torch.Tensor, rhs: torch.Tensor) -> torch.Te
 
     This avoids SVD and the associated CUDA synchronisation.  A scale-aware,
     dtype-specific diagonal term keeps rank-deficient batches finite.  It is an
-    explicitly opt-in throughput approximation; the default path remains the
-    exact SVD implementation above.
+    throughput approximation used by the default execution mode.
     """
     rows, cols = matrix.shape[-2:]
     base = 1e-7 if matrix.dtype in (torch.float16, torch.bfloat16, torch.float32) else 1e-12
@@ -197,7 +194,7 @@ def compose_cc_model_slist(
 # Core batched planner
 # --------------------------------------------------------------------------- #
 @dataclass
-class BatchedMotionResult:
+class MotionResult:
     """Raw (differential) closed-chain trajectory for a batch."""
 
     joint_trajectory: torch.Tensor  # [B, m-1, n]  (differential cc joint points)
@@ -208,13 +205,8 @@ class BatchedMotionResult:
     update_trail: str = ""
 
 
-class BatchedCcAffordancePlanner:
-    """Batched trajectory-stepping + closed-chain IK solver.
-
-    Configurable exactly like :class:`closed_chain_affordance.planner.CcAffordancePlanner`.
-    State is per-call (no mutable instance attributes read during the IK loop), so
-    a single instance is safe to reuse across batched calls.
-    """
+class Planner:
+    """Batched trajectory-stepping and closed-chain IK solver."""
 
     def __init__(
         self,
@@ -224,8 +216,6 @@ class BatchedCcAffordancePlanner:
         compile: bool = False,
         fast_linear_solver: bool = True,
     ):
-        from .structs import PlannerConfig
-
         if planner_config is None:
             planner_config = PlannerConfig()
         self.accuracy_ = planner_config.accuracy
@@ -292,7 +282,7 @@ class BatchedCcAffordancePlanner:
 
         This removes two SVDs per Newton iteration and is intended for float32
         trajectory generation. Pass ``enabled=False`` (or use the constructor's
-        reference flags) when exact SVD semantics are required for parity work.
+        reference flags) when exact SVD semantics are required for diagnostics.
         """
         if self._compiled_:
             raise RuntimeError("Linear-solver mode must be selected before compiling the IK solver.")
@@ -315,7 +305,7 @@ class BatchedCcAffordancePlanner:
         stepper_max_itr_m: int,
         has_approach: bool = False,
         update_method: UpdateMethod | None = None,
-    ) -> BatchedMotionResult:
+    ) -> MotionResult:
         """Generate the differential closed-chain trajectory for the batch.
 
         ``cc_slist`` is ``[B, 6, n]``, ``theta_sdf`` is ``[B, tau]`` (secondary
@@ -417,13 +407,13 @@ class BatchedCcAffordancePlanner:
         trail = method.name.lower()  # "inverse" / "transpose"
         # elapsed time is informational only (timing inside a batched call is not per-element)
         _ = (time.perf_counter() - start)
-        return BatchedMotionResult(
+        return MotionResult(
             joint_trajectory, valid_mask, desc, active_iterations_t,
             executed_iterations_t, update_trail=trail,
         )
 
     @staticmethod
-    def _select_best(inverse: BatchedMotionResult, transpose: BatchedMotionResult) -> BatchedMotionResult:
+    def _select_best(inverse: MotionResult, transpose: MotionResult) -> MotionResult:
         """Deterministically select the better update method per environment.
 
         A FULL trajectory wins over a non-FULL one. Otherwise the method with
@@ -444,7 +434,7 @@ class BatchedCcAffordancePlanner:
         active = torch.where(step_mask, inverse.active_iterations, transpose.active_iterations)
         # Both planners were evaluated, so this is the actual total compute cost.
         executed = inverse.executed_iterations + transpose.executed_iterations
-        return BatchedMotionResult(
+        return MotionResult(
             trajectory, valid, desc, active, executed,
             update_trail="best (per-environment inverse/transpose selection)",
         )
@@ -668,7 +658,7 @@ def convert_cc_traj_to_robot_traj(
 # High-level batched interface
 # --------------------------------------------------------------------------- #
 @dataclass
-class BatchedPlannerResult:
+class PlannerResult:
     """Result of a batched planning call."""
 
     joint_trajectory: torch.Tensor  # [B, T, n_robot (+1 gripper)] absolute robot trajectory
@@ -679,14 +669,14 @@ class BatchedPlannerResult:
     includes_gripper: bool = False
     # [B] bool; the rectangular output may still have a batch-level gripper column.
     gripper_active_mask: torch.Tensor = field(default=None)
-    # [B, m-1, n_cc], retained for diagnostics and parity testing.
+    # [B, m-1, n_cc], retained for diagnostics and residual checking.
     differential_trajectory: torch.Tensor = field(default=None)
     active_iterations: torch.Tensor = field(default=None)  # [B, m-1]
     executed_iterations: torch.Tensor = field(default=None)  # [m-1]
     planning_time: datetime.timedelta = field(default_factory=datetime.timedelta)
 
 
-class BatchedCcAffordancePlannerInterface:
+class PlannerInterface:
     """User-facing batched interface mirroring :class:`CcAffordancePlannerInterface`.
 
     Inputs are plain tensors so this drops straight into an Isaac Lab loop (all on
@@ -704,12 +694,10 @@ class BatchedCcAffordancePlannerInterface:
         compile: bool = False,
         fast_linear_solver: bool = True,
     ):
-        from .structs import PlannerConfig
-
         if planner_config is None:
             planner_config = PlannerConfig()
         self.planner_config_ = planner_config
-        self.planner_ = BatchedCcAffordancePlanner(
+        self.planner_ = Planner(
             planner_config,
             fast_mode=fast_mode,
             compile=compile,
@@ -749,7 +737,7 @@ class BatchedCcAffordancePlannerInterface:
         goal_gripper: torch.Tensor | None = None,  # [B]; NaN entries hold that env's start value
         gripper_goal_type: GripperGoalType = GripperGoalType.CONSTANT,
         update_method: UpdateMethod | None = None,
-    ) -> BatchedPlannerResult:
+    ) -> PlannerResult:
         start = time.perf_counter()
         method = self.planner_config_.update_method if update_method is None else update_method
 
@@ -851,7 +839,7 @@ class BatchedCcAffordancePlannerInterface:
         full_success = motion.description_codes == _DESC_CODE[TrajectoryDescription.FULL]
         description = [_DESC_FROM_CODE[int(c)] for c in motion.description_codes.tolist()]
 
-        return BatchedPlannerResult(
+        return PlannerResult(
             joint_trajectory=robot_traj,
             valid_mask=motion.valid_mask,
             success=success,
@@ -907,6 +895,6 @@ def _require_compatible(tensor: torch.Tensor, reference: torch.Tensor, name: str
         raise ValueError(f"{name} must use the same device and dtype as joint_states")
 
 
-def plan_batch(*args, **kwargs):
+def plan(*args, **kwargs):
     """Convenience helper: build an interface and plan in one call."""
-    return BatchedCcAffordancePlannerInterface().generate_joint_trajectory(*args, **kwargs)
+    return PlannerInterface().generate_joint_trajectory(*args, **kwargs)

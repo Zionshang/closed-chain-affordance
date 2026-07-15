@@ -1,7 +1,6 @@
-"""Batched (leading-dim) rigid-body math in PyTorch.
+"""Batched rigid-body math implemented with Torch.
 
-Tensor counterparts of the NumPy primitives in :mod:`closed_chain_affordance.math_utils`.
-Every op is batched over arbitrary leading dimensions (``...``), so the same code
+Every operation supports arbitrary leading dimensions (``...``), so the same code
 serves a single sample (``[...]``), a batch (``[B, ...]``), or a nested batch
 (``[B, J, ...]``) — the shape Isaac Lab asks for when one planner call must
 produce trajectories for every environment at once.
@@ -10,8 +9,7 @@ Design notes
 ------------
 * **SO(3)/SE(3) exponentials** use :func:`torch.linalg.matrix_exp` on the matrix
   representation. This is the *definition* of the group exponential, so it is
-  exact and branch-free — the NumPy code's ``near_zero`` branches were only
-  analytic shortcuts for computing the very same matrix exponential.
+  exact and branch-free.
 * **SO(3)/SE(3) logarithms** use the closed-form Modern-Robotics formula with
   ``torch.where`` fallbacks for the ``theta ~ 0`` and ``theta ~ pi``
   singularities (vectorised over the batch). These are the only branchy pieces.
@@ -22,7 +20,7 @@ Design notes
 Shapes
 ------
 Vectors are ``[..., 6]`` / ``[..., 3]`` and transforms are ``[..., 4, 4]``, matching
-the Modern-Robotics layout of the reference implementation.
+the conventional Modern-Robotics layout.
 """
 
 from __future__ import annotations
