@@ -27,6 +27,9 @@ from _scenarios import SCENARIOS, build_x5_robot  # noqa: E402
 from test_batched_vs_numpy import scenario_to_batched_kwargs  # noqa: E402
 
 
+REFERENCE_MODE = dict(fast_mode=False, compile=False, fast_linear_solver=False)
+
+
 class BatchedFeatureTests(unittest.TestCase):
     def test_float32_small_angle_log_keeps_sub_acos_resolution(self):
         # In float32, trace(R) rounds to exactly 3 for angles at this scale.
@@ -63,7 +66,7 @@ class BatchedFeatureTests(unittest.TestCase):
         reference = cca.CcAffordancePlannerInterface(cfg).generate_joint_trajectory(robot, task)
         self.assertEqual(reference.trajectory_description, cca.TrajectoryDescription.FULL)
 
-        result = cca.BatchedCcAffordancePlannerInterface(cfg).generate_joint_trajectory(
+        result = cca.BatchedCcAffordancePlannerInterface(cfg, **REFERENCE_MODE).generate_joint_trajectory(
             robot_slist=torch.tensor(robot.slist, dtype=torch.float32),
             robot_m=torch.tensor(robot.M, dtype=torch.float32),
             joint_states=torch.tensor(robot.joint_states, dtype=torch.float32),
@@ -97,7 +100,7 @@ class BatchedFeatureTests(unittest.TestCase):
         cfg.ik_max_itr = 20
         batch = 6  # deliberately equals the leading dimension of an unbatched slist
         screw = torch.tensor(cca.get_screw(task.affordance_info), dtype=torch.float64)
-        result = cca.BatchedCcAffordancePlannerInterface(cfg).generate_joint_trajectory(
+        result = cca.BatchedCcAffordancePlannerInterface(cfg, **REFERENCE_MODE).generate_joint_trajectory(
             robot_slist=torch.tensor(robot.slist, dtype=torch.float64),
             robot_m=torch.tensor(robot.M, dtype=torch.float64),
             joint_states=torch.tensor(np.broadcast_to(robot.joint_states, (batch, 6)).copy()),
@@ -116,7 +119,7 @@ class BatchedFeatureTests(unittest.TestCase):
         kwargs["trajectory_density"] = 3
         kwargs["gripper_state"] = torch.tensor([0.1, 0.2], dtype=torch.float64)
         kwargs["goal_gripper"] = torch.tensor([0.4, float("nan")], dtype=torch.float64)
-        result = cca.BatchedCcAffordancePlannerInterface(cfg).generate_joint_trajectory(**kwargs)
+        result = cca.BatchedCcAffordancePlannerInterface(cfg, **REFERENCE_MODE).generate_joint_trajectory(**kwargs)
         self.assertTrue(result.includes_gripper)
         self.assertEqual(result.gripper_active_mask.tolist(), [True, False])
         self.assertFalse(bool(torch.isnan(result.joint_trajectory).any()))
@@ -130,7 +133,7 @@ class BatchedFeatureTests(unittest.TestCase):
         cfg.ik_max_itr = 40
         kwargs = scenario_to_batched_kwargs(robot, task, cfg, 3, torch.float64)
         kwargs["trajectory_density"] = 4
-        core = cca.BatchedCcAffordancePlanner(cfg)
+        core = cca.BatchedCcAffordancePlanner(cfg, **REFERENCE_MODE)
 
         cc, _ = bp.compose_cc_model_slist(
             kwargs["robot_slist"], kwargs["robot_m"], kwargs["joint_states"],
@@ -156,7 +159,7 @@ class BatchedFeatureTests(unittest.TestCase):
         goals = [0.2, 0.35, 0.5]
         kwargs = scenario_to_batched_kwargs(robot, task, cfg, len(goals), torch.float64)
         kwargs["goal_affordance"] = torch.tensor(goals, dtype=torch.float64)
-        result = cca.BatchedCcAffordancePlannerInterface(cfg).generate_joint_trajectory(**kwargs)
+        result = cca.BatchedCcAffordancePlannerInterface(cfg, **REFERENCE_MODE).generate_joint_trajectory(**kwargs)
 
         for env, goal in enumerate(goals):
             scalar_task = copy.deepcopy(task)
@@ -180,7 +183,7 @@ class BatchedFeatureTests(unittest.TestCase):
         cfg.ik_max_itr = 30
         kwargs = scenario_to_batched_kwargs(robot, task, cfg, 2, torch.float64)
         kwargs["goal_affordance"] = torch.tensor([0.4, 100.0], dtype=torch.float64)
-        result = cca.BatchedCcAffordancePlannerInterface(cfg).generate_joint_trajectory(**kwargs)
+        result = cca.BatchedCcAffordancePlannerInterface(cfg, **REFERENCE_MODE).generate_joint_trajectory(**kwargs)
 
         self.assertEqual(result.full_success.tolist(), [True, False])
         self.assertEqual(result.valid_mask.sum(dim=-1).tolist(), [4, 0])
@@ -193,15 +196,19 @@ class BatchedFeatureTests(unittest.TestCase):
         # One unresolved environment determines whole-batch latency.
         self.assertTrue(bool((result.executed_iterations == cfg.ik_max_itr).all()))
 
-    def test_fast_solver_reports_work_and_preserves_closure(self):
+    def test_default_fast_mode_reports_fixed_work_and_preserves_closure(self):
         robot, task, cfg = SCENARIOS["rotation_inverse"](cca)
         cfg.ik_max_itr = 40
         kwargs = scenario_to_batched_kwargs(robot, task, cfg, 8, torch.float32)
         kwargs["goal_affordance"] = torch.linspace(0.2, 0.6, 8)
-        iface = cca.BatchedCcAffordancePlannerInterface(cfg).enable_fast_linear_solver()
+        iface = cca.BatchedCcAffordancePlannerInterface(cfg)
+        self.assertFalse(iface.planner_.early_stop_)
+        self.assertTrue(iface.planner_.fast_solve_)
+        self.assertFalse(iface.planner_._compile_requested_)
         result = iface.generate_joint_trajectory(**kwargs)
+        self.assertFalse(iface.planner_._compiled_)
         self.assertTrue(bool(result.full_success.all()))
-        self.assertTrue(bool((result.executed_iterations <= cfg.ik_max_itr).all()))
+        self.assertTrue(bool((result.executed_iterations == cfg.ik_max_itr).all()))
         self.assertTrue(torch.equal(result.full_success, result.valid_mask.all(dim=-1)))
 
         cc, _ = bp.compose_cc_model_slist(

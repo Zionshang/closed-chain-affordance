@@ -204,7 +204,9 @@ def compare_core(name):
 
     cc_t = torch.tensor(np.broadcast_to(cc_slist, (B, *cc_slist.shape)).copy(), dtype=DTYPE)
     sec_t = torch.tensor(np.broadcast_to(secondary, (B, *secondary.shape)).copy(), dtype=DTYPE)
-    planner = cca.BatchedCcAffordancePlanner(cfg)
+    planner = cca.BatchedCcAffordancePlanner(
+        cfg, fast_mode=False, compile=False, fast_linear_solver=False
+    )
     out = planner.generate_motion_joint_trajectory(
         cc_t, sec_t, tau, int(task.trajectory_density),
         has_approach=has_approach, update_method=method,
@@ -256,7 +258,9 @@ def compare_interface(name):
                if ref.joint_trajectory else np.zeros((0, n_out)))
 
     kwargs = scenario_to_batched_kwargs(robot, task, cfg, B, DTYPE)
-    result = cca.BatchedCcAffordancePlannerInterface(cfg).generate_joint_trajectory(**kwargs)
+    result = cca.BatchedCcAffordancePlannerInterface(
+        cfg, fast_mode=False, compile=False, fast_linear_solver=False
+    ).generate_joint_trajectory(**kwargs)
     assert result.includes_gripper == has_gripper, f"[{name}/iface] gripper flag mismatch"
 
     valid = result.valid_mask.numpy()
@@ -295,7 +299,9 @@ def compare_interface_sensitive(name):
     robot, task, cfg = _scenario_inputs(name)
     ref = cca.CcAffordancePlannerInterface(cfg).generate_joint_trajectory(robot, task)
     kwargs = scenario_to_batched_kwargs(robot, task, cfg, B, DTYPE)
-    result = cca.BatchedCcAffordancePlannerInterface(cfg).generate_joint_trajectory(**kwargs)
+    result = cca.BatchedCcAffordancePlannerInterface(
+        cfg, fast_mode=False, compile=False, fast_linear_solver=False
+    ).generate_joint_trajectory(**kwargs)
 
     for env in range(B):
         assert bool(result.success[env]) == ref.success, f"[{name} env{env}] success mismatch"

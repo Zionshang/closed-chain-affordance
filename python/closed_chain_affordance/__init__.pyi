@@ -221,7 +221,14 @@ class BatchedPlannerResult:
 
 
 class BatchedCcAffordancePlanner:
-    def __init__(self, planner_config: PlannerConfig | None = ...) -> None: ...
+    def __init__(
+        self,
+        planner_config: PlannerConfig | None = ...,
+        *,
+        fast_mode: bool = ...,
+        compile: bool = ...,
+        fast_linear_solver: bool = ...,
+    ) -> None: ...
     def enable_fast_mode(
         self, compile: bool = ..., fast_solve: bool = ...
     ) -> BatchedCcAffordancePlanner: ...
@@ -241,7 +248,14 @@ class BatchedCcAffordancePlanner:
 
 
 class BatchedCcAffordancePlannerInterface:
-    def __init__(self, planner_config: PlannerConfig | None = ...) -> None: ...
+    def __init__(
+        self,
+        planner_config: PlannerConfig | None = ...,
+        *,
+        fast_mode: bool = ...,
+        compile: bool = ...,
+        fast_linear_solver: bool = ...,
+    ) -> None: ...
     def enable_fast_mode(
         self, compile: bool = ..., fast_solve: bool = ...
     ) -> BatchedCcAffordancePlannerInterface: ...

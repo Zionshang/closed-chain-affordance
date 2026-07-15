@@ -38,14 +38,17 @@ X5_CONFIG = REPO_ROOT / "python" / "x5_urdf_config.yaml"
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float32
-# This switches only the pseudoinverse implementation.  It does not change the
-# task model, constraints, convergence checks, or APPROACH/AFFORDANCE semantics.
-USE_REGULARIZED_LINEAR_SOLVER = False
+# Torch throughput defaults.  Fast mode uses a fixed iteration count (no early
+# stop) and optionally compiles the IK loop; the regularized solver replaces two
+# SVD applications without changing the task model or convergence criteria.
+USE_FAST_MODE = True
+COMPILE_FAST_MODE = False
+USE_REGULARIZED_LINEAR_SOLVER = True
 N_ENVS = 64
 APPROACH_DENSITY = 12
 TURN_DENSITY = 12
-APPROACH_MAX_ITR = 10
-TURN_MAX_ITR = 10
+APPROACH_MAX_ITR = 15
+TURN_MAX_ITR = 15
 
 # Keep the same zero seed used by the original x5 example.  Its 6x6 robot
 # Jacobian is full rank; convergence depends on the requested Cartesian path
@@ -152,12 +155,18 @@ def _robot_tensors(robot, n):
 
 def _make_planner(max_iterations):
     config = cca.PlannerConfig()
+    config.accuracy = 0.1
+    config.closure_err_threshold_ang = 1e-3
+    config.closure_err_threshold_lin = 1e-2
+
     config.update_method = cca.UpdateMethod.INVERSE
     config.ik_max_itr = max_iterations
-    interface = cca.BatchedCcAffordancePlannerInterface(config)
-    if USE_REGULARIZED_LINEAR_SOLVER:
-        interface.enable_fast_linear_solver()
-    return interface
+    return cca.BatchedCcAffordancePlannerInterface(
+        config,
+        fast_mode=USE_FAST_MODE,
+        compile=COMPILE_FAST_MODE,
+        fast_linear_solver=USE_REGULARIZED_LINEAR_SOLVER,
+    )
 
 
 def _timed_plan(iface, kwargs):
@@ -455,6 +464,8 @@ def main():
         f"Two-stage batched valve planning: {N_ENVS} x5 arms on {DEVICE} "
         f"(approach {approach_distances.min()*100:.1f}--{approach_distances.max()*100:.1f} cm; "
         f"dtype={str(DTYPE).removeprefix('torch.')}, "
+        f"mode={'fast' if USE_FAST_MODE else 'early-stop'}, "
+        f"compile={COMPILE_FAST_MODE and USE_FAST_MODE}, "
         f"linear solver={'regularized' if USE_REGULARIZED_LINEAR_SOLVER else 'SVD'})"
     )
     result = plan_batch(

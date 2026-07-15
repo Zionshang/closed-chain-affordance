@@ -15,10 +15,10 @@ Algorithmic mapping (see the design discussion for detail):
 * The conditional DLS branch in the inverse update is evaluated **branch-free**
   via ``torch.where`` (both branches computed, selected element-wise), so it
   reproduces the reference numerics exactly rather than always damping.
-* Pseudoinverse products are applied directly from a thin SVD instead of
-  materialising inverse matrices. One-row updates (the common affordance-only
-  case) use their closed form, and float32 throughput mode can opt into
-  regularised normal equations for two remaining applications.
+* Pseudoinverse products are applied directly. The default throughput mode uses
+  regularised normal equations for two applications; reference mode restores
+  the thin-SVD/rank-threshold path. One-row updates (the common affordance-only
+  case) use their closed form in either mode.
 
 All batch elements must share the same structure (robot DOF, virtual-screw order,
 motion type, trajectory density); only the *values* (joint state, goals, screws,
@@ -216,7 +216,14 @@ class BatchedCcAffordancePlanner:
     a single instance is safe to reuse across batched calls.
     """
 
-    def __init__(self, planner_config=None):
+    def __init__(
+        self,
+        planner_config=None,
+        *,
+        fast_mode: bool = True,
+        compile: bool = False,
+        fast_linear_solver: bool = True,
+    ):
         from .structs import PlannerConfig
 
         if planner_config is None:
@@ -230,17 +237,21 @@ class BatchedCcAffordancePlanner:
         self.cond_N_threshold_ = 100.0
         self.lambda_ = 1.1
         self.goal_min_ = 1e-5
-        # Check convergence in small chunks.  A check interval of one reproduces
-        # the scalar solver's control flow, while a small interval (typically 4)
-        # avoids synchronising CUDA with the host on every Newton step without
-        # blindly running all ``ik_max_itr`` iterations.
+        # Torch defaults favour batched throughput: fixed iteration count and
+        # the regularised SVD-free linear solver. torch.compile remains opt-in
+        # because its one-time compilation cost can dominate small-matrix jobs.
         self.early_stop_ = True
         self.early_stop_check_interval_ = 1
         self.fast_solve_ = False
         self._compiled_ = False
+        self._compile_requested_ = False
+        if fast_mode:
+            self.enable_fast_mode(compile=compile, fast_solve=fast_linear_solver)
+        else:
+            self.fast_solve_ = bool(fast_linear_solver)
 
     # ------------------------------------------------------------------ #
-    def enable_fast_mode(self, compile: bool = True, fast_solve: bool = False):
+    def enable_fast_mode(self, compile: bool = True, fast_solve: bool = True):
         """Switch to the GPU-throughput-optimised IK loop.
 
         Disables the per-iteration early-exit (which forces a GPU->CPU sync every
@@ -253,12 +264,10 @@ class BatchedCcAffordancePlanner:
         """
         self.early_stop_ = False
         self.fast_solve_ = bool(fast_solve)
-        if compile and not self._compiled_:
-            self._call_cc_ik_solver = torch.compile(self._call_cc_ik_solver, dynamic=False)
-            self._compiled_ = True
+        self._compile_requested_ = bool(compile)
         return self
 
-    def enable_chunked_early_stop(self, check_interval: int = 4, fast_solve: bool = False):
+    def enable_chunked_early_stop(self, check_interval: int = 4, fast_solve: bool = True):
         """Use batched early stopping while checking the device every few steps.
 
         This amortises host checks and keeps the exact convergence masks, but may execute at most
@@ -272,6 +281,7 @@ class BatchedCcAffordancePlanner:
             raise RuntimeError(
                 "Cannot re-enable data-dependent early stopping after compiling the IK solver."
             )
+        self._compile_requested_ = False
         self.early_stop_ = True
         self.early_stop_check_interval_ = int(check_interval)
         self.fast_solve_ = bool(fast_solve)
@@ -281,13 +291,19 @@ class BatchedCcAffordancePlanner:
         """Use regularised normal equations for ``pinv(A) @ b`` applications.
 
         This removes two SVDs per Newton iteration and is intended for float32
-        trajectory generation. The default exact SVD path remains preferable
-        for reference/parity work.
+        trajectory generation. Pass ``enabled=False`` (or use the constructor's
+        reference flags) when exact SVD semantics are required for parity work.
         """
         if self._compiled_:
             raise RuntimeError("Linear-solver mode must be selected before compiling the IK solver.")
         self.fast_solve_ = bool(enabled)
         return self
+
+    def _ensure_compiled(self):
+        """Lazily compile so callers can still change mode before the first plan."""
+        if self._compile_requested_ and not self._compiled_:
+            self._call_cc_ik_solver = torch.compile(self._call_cc_ik_solver, dynamic=False)
+            self._compiled_ = True
 
     # ------------------------------------------------------------------ #
     @torch.inference_mode()
@@ -306,6 +322,7 @@ class BatchedCcAffordancePlanner:
         joint goals, last entry = affordance goal; for approach the second-last =
         approach limit), ``task_offset_tau`` = number of secondary joints.
         """
+        self._ensure_compiled()
         if cc_slist.ndim != 3 or cc_slist.shape[-2] != _TWIST_LENGTH:
             raise ValueError("cc_slist must have shape [B, 6, n]")
         if theta_sdf.ndim != 2 or theta_sdf.shape[0] != cc_slist.shape[0]:
@@ -679,20 +696,32 @@ class BatchedCcAffordancePlannerInterface:
     screws, poses) is passed as ``[B, ...]`` tensors.
     """
 
-    def __init__(self, planner_config=None):
+    def __init__(
+        self,
+        planner_config=None,
+        *,
+        fast_mode: bool = True,
+        compile: bool = False,
+        fast_linear_solver: bool = True,
+    ):
         from .structs import PlannerConfig
 
         if planner_config is None:
             planner_config = PlannerConfig()
         self.planner_config_ = planner_config
-        self.planner_ = BatchedCcAffordancePlanner(planner_config)
+        self.planner_ = BatchedCcAffordancePlanner(
+            planner_config,
+            fast_mode=fast_mode,
+            compile=compile,
+            fast_linear_solver=fast_linear_solver,
+        )
 
-    def enable_fast_mode(self, compile: bool = True, fast_solve: bool = False):
+    def enable_fast_mode(self, compile: bool = True, fast_solve: bool = True):
         """Enable the compiled fixed-iteration IK loop on the inner planner."""
         self.planner_.enable_fast_mode(compile=compile, fast_solve=fast_solve)
         return self
 
-    def enable_chunked_early_stop(self, check_interval: int = 4, fast_solve: bool = False):
+    def enable_chunked_early_stop(self, check_interval: int = 4, fast_solve: bool = True):
         """Enable eager planning with amortised convergence checks."""
         self.planner_.enable_chunked_early_stop(check_interval, fast_solve=fast_solve)
         return self
