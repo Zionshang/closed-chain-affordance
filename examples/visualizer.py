@@ -257,6 +257,20 @@ class ViserVisualizer:
     def _quaternion(rotation: np.ndarray) -> np.ndarray:
         return Rotation.from_matrix(rotation).as_quat()[[3, 0, 1, 2]]
 
+    @staticmethod
+    def _rotation_and_scale(transform: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Separate the rotation and per-axis scale stored in a scene transform."""
+        linear = transform[:3, :3]
+        scale = np.linalg.norm(linear, axis=0)
+        if np.any(scale <= np.finfo(scale.dtype).eps):
+            raise ValueError("URDF visual geometry contains a zero scale")
+
+        rotation = linear / scale
+        if np.linalg.det(rotation) < 0.0:
+            scale[-1] *= -1.0
+            rotation[:, -1] *= -1.0
+        return rotation, scale
+
     def _add_path(
         self,
         server,
@@ -406,11 +420,14 @@ class ViserVisualizer:
             for link_index, (node, transform) in enumerate(
                 zip(self.geometry_nodes, transforms)
             ):
+                rotation, scale = self._rotation_and_scale(transform)
                 handle = server.scene.add_mesh_trimesh(
-                    f"robots/{environment}/link{link_index}", self.link_meshes[node]
+                    f"robots/{environment}/link{link_index}",
+                    self.link_meshes[node],
+                    scale=tuple(scale),
                 )
                 handle.position = transform[:3, 3] + offsets[environment]
-                handle.wxyz = self._quaternion(transform[:3, :3])
+                handle.wxyz = self._quaternion(rotation)
                 handles.append(handle)
             robot_handles.append(handles)
 
@@ -428,8 +445,9 @@ class ViserVisualizer:
                             trajectory[environment, frame]
                         )
                         for handle, transform in zip(handles, transforms):
+                            rotation, _ = self._rotation_and_scale(transform)
                             handle.position = transform[:3, 3] + offsets[environment]
-                            handle.wxyz = self._quaternion(transform[:3, :3])
+                            handle.wxyz = self._quaternion(rotation)
                     time.sleep(self.config.animation_step_s)
         except KeyboardInterrupt:
             print("\nStopped.")

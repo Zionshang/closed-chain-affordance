@@ -1,0 +1,10 @@
+# Serial chain used by the training-time CCA reference command.
+ref_frame:
+  - name: base_link
+
+kinematic_chain:
+  - base_joint_name: joint1
+    end_joint_name: joint6
+
+end_effector:
+  - frame_name: tcp
