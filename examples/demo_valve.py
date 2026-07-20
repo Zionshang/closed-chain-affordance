@@ -27,15 +27,15 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # 规划�
 DTYPE = torch.float32  # 规划张量精度
 NUM_ENVIRONMENTS = 4096  # 并行规划环境数
 VISUALIZE_COUNT = 32  # Viser 中显示的环境数
-TRAJECTORY_POINTS = 12  # 每个阶段的轨迹点数
-IK_ITERATIONS = 50  # 每个轨迹点的最大 IK 迭代次数
+TRAJECTORY_POINTS = 6  # 每个阶段的轨迹点数
+IK_ITERATIONS = 25  # 每个轨迹点的最大 IK 迭代次数
 SEED = 42  # 随机种子
 
 VALVE_POSITION = (0.55, 0.0, 0.24)  # 阀门中心的基准位置
 VALVE_POSITION_RANDOMIZATION = {  # 各坐标轴的位置随机偏移范围
-    "x": (-0.0, 0.0),
-    "y": (-0.0, 0.0),
-    "z": (0.0, 0.0),
+    "x": (-0.05, 0.05),
+    "y": (-0.05, 0.05),
+    "z": (-0.05, 0.05),
 }
 VALVE_OUTER_DIAMETERS = (0.28, 0.32, 0.36)  # 可选阀门外径
 VALVE_RIM_DIAMETER = 0.035  # 外圈管材直径
@@ -80,11 +80,12 @@ def main() -> None:
     )
     planner = cca.PlannerInterface(
         cca.PlannerConfig(
-            ik_max_itr=IK_ITERATIONS,
+            accuracy=0.02,
+            ik_max_itr=150,
             update_method=cca.UpdateMethod.INVERSE,
-            secondary_goal_abs_tolerance=1e-3,
-            closure_err_threshold_ang=1e-4,
-            closure_err_threshold_lin=1e-3,
+            secondary_goal_abs_tolerance=1e-4,
+            closure_err_threshold_ang=5e-4,
+            closure_err_threshold_lin=5e-4,
         ),
         fast_mode=False,
         compile=False,
