@@ -107,6 +107,8 @@ valid_steps = result.valid_mask       # [B, 11]，逐目标点的收敛状态
 `PlannerConfig` 是任务无关的统一收敛配置：
 
 - `accuracy=0.1`：离散目标的相对容差。
+- `secondary_goal_min_magnitude=1e-5`：仅对非零次级目标施加的最小幅值。
+- `secondary_goal_abs_tolerance=1e-5`：独立于目标幅值的绝对容差下限；精确零目标仍保持为零。
 - `closure_err_threshold_ang=1e-4`：闭链旋转残差阈值。
 - `closure_err_threshold_lin=1e-5`：闭链平移残差阈值，单位为米。
 - `ik_max_itr=200`：每个轨迹点的最大 IK 迭代次数。
@@ -124,6 +126,9 @@ AFFORDANCE 的统一任务描述：
 若确实希望提前终止，可在首次规划前调用
 `planner.enable_chunked_early_stop(check_interval=4)`。失败时返回张量中仍保留每个目标点
 的最后候选解，是否真正收敛必须以 `valid_mask` / `full_success` 为准。
+
+`PlannerInterface.solve_pose_ik()` 提供批量阻尼最小二乘末端位姿 IK，返回
+`(joint_states, converged)`，可独立于轨迹规划结果求解 canonical pose 对应的关节状态。
 
 ## 示例
 

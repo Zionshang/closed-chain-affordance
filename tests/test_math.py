@@ -20,6 +20,15 @@ class TorchMathTests(unittest.TestCase):
         identity = transform @ cm.trans_inv(transform)
         torch.testing.assert_close(identity, torch.eye(4, dtype=torch.float64), atol=1e-10, rtol=1e-10)
 
+    def test_magnitude_clamp_can_preserve_exact_zero(self):
+        values = torch.tensor([-1e-8, 0.0, 1e-8], dtype=torch.float32)
+        clamped = cm.clamp_to_magnitude_minimum(
+            values, 1e-5, preserve_zero=True
+        )
+        torch.testing.assert_close(
+            clamped, torch.tensor([-1e-5, 0.0, 1e-5], dtype=torch.float32)
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

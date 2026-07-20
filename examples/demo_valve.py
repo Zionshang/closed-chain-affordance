@@ -42,7 +42,6 @@ VALVE_RIM_DIAMETER = 0.035  # 外圈管材直径
 VALVE_AXIS = (1.0, 0.0, 0.0)  # 阀门旋转轴方向
 VALVE_UP = (0.0, 0.0, 1.0)  # 初始抓取点的径向方向
 TURN_ANGLE = torch.pi  # 阀门目标转角
-GRASP_ROLL = torch.pi / 2  # 接近阶段的末端滚转角
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -83,10 +82,11 @@ def main() -> None:
         cca.PlannerConfig(
             ik_max_itr=IK_ITERATIONS,
             update_method=cca.UpdateMethod.INVERSE,
-            closure_err_threshold_ang=1e-3,
-            closure_err_threshold_lin=1e-2,
+            secondary_goal_abs_tolerance=1e-3,
+            closure_err_threshold_ang=1e-4,
+            closure_err_threshold_lin=1e-3,
         ),
-        fast_mode=True,
+        fast_mode=False,
         compile=False,
         fast_linear_solver=True,
     )
@@ -122,13 +122,16 @@ def main() -> None:
         NUM_ENVIRONMENTS, -1
     )
     grasp_points = centres + grasp_radii.unsqueeze(-1) * up
-    approach_delta = grasp_points - initial_pose[:, :3, 3]
-    approach_distance = torch.linalg.vector_norm(approach_delta, dim=-1)
-    approach_direction = approach_delta / approach_distance.clamp_min(1e-6).unsqueeze(-1)
-    approach_orientation = torch.zeros(
-        NUM_ENVIRONMENTS, 3, device=DEVICE, dtype=DTYPE
+    # The canonical contact pose keeps the current TCP orientation and moves to
+    # the valve rim. A large simultaneous reorientation from Piper's singular
+    # zero configuration should be planned as a separate stage.
+    canonical_pose = initial_pose.clone()
+    canonical_pose[:, :3, 3] = grasp_points
+
+    valve_axes = torch.tensor(VALVE_AXIS, device=DEVICE, dtype=DTYPE).expand(
+        NUM_ENVIRONMENTS, -1
     )
-    approach_orientation[:, 0] = GRASP_ROLL
+    valve_screws = cca.get_screw(cca.ScrewType.ROTATION, valve_axes, centres)
 
     if DEVICE.type == "cuda":
         torch.cuda.synchronize(DEVICE)
@@ -138,32 +141,43 @@ def main() -> None:
         robot_slist=robot.slist,
         robot_m=robot.M,
         joint_states=initial_joints,
-        motion_type=cca.MotionType.AFFORDANCE,
-        affordance_screw=cca.get_screw(
-            cca.ScrewType.TRANSLATION,
-            approach_direction,
-            torch.zeros_like(approach_direction),
+        motion_type=cca.MotionType.APPROACH,
+        affordance_screw=valve_screws,
+        goal_affordance=torch.zeros(
+            NUM_ENVIRONMENTS, device=DEVICE, dtype=DTYPE
         ),
-        goal_affordance=approach_distance,
         trajectory_density=TRAJECTORY_POINTS,
-        vir_screw_order=cca.VirtualScrewOrder.XYZ,
-        goal_ee_orientation=approach_orientation,
+        vir_screw_order=cca.VirtualScrewOrder.NONE,
+        canonical_pose=canonical_pose,
     )
 
-    valve_axes = torch.tensor(VALVE_AXIS, device=DEVICE, dtype=DTYPE).expand(
-        NUM_ENVIRONMENTS, -1
-    )
     turn_angles = torch.full(
         (NUM_ENVIRONMENTS,), TURN_ANGLE, device=DEVICE, dtype=DTYPE
     )
+    approach_success = approach.full_success
+    approach_failed = ~approach_success
+    turn_start_joints = approach.joint_trajectory[:, -1].clone()
+    fallback_success = torch.zeros_like(approach_success)
+    failed_indices = torch.nonzero(approach_failed, as_tuple=False).squeeze(-1)
+    if failed_indices.numel() > 0:
+        ideal_joints, ideal_converged = planner.solve_pose_ik(
+            robot_slist=robot.slist,
+            robot_m=robot.M,
+            joint_seed=initial_joints[failed_indices],
+            target_pose=canonical_pose[failed_indices],
+        )
+        turn_start_joints[failed_indices] = ideal_joints
+        fallback_success[failed_indices] = ideal_converged
+
+    # Turn always continues. Failed approach environments start from a fresh IK
+    # solution of the specified ideal canonical pose, never from their failed
+    # closed-chain candidate.
     turn = planner.generate_joint_trajectory(
         robot_slist=robot.slist,
         robot_m=robot.M,
-        joint_states=approach.joint_trajectory[:, -1],
+        joint_states=turn_start_joints,
         motion_type=cca.MotionType.AFFORDANCE,
-        affordance_screw=cca.get_screw(
-            cca.ScrewType.ROTATION, valve_axes, centres
-        ),
+        affordance_screw=valve_screws,
         goal_affordance=turn_angles,
         trajectory_density=TRAJECTORY_POINTS,
         vir_screw_order=cca.VirtualScrewOrder.NONE,
@@ -173,16 +187,20 @@ def main() -> None:
         torch.cuda.synchronize(DEVICE)
     planning_time = time.perf_counter() - start_time
 
+    approach_trajectory = approach.joint_trajectory.clone()
+    approach_trajectory[failed_indices, -1] = turn_start_joints[failed_indices]
     trajectory = torch.cat(
-        (approach.joint_trajectory, turn.joint_trajectory[:, 1:]), dim=1
+        (approach_trajectory, turn.joint_trajectory[:, 1:]), dim=1
     )
     valid = torch.cat((approach.valid_mask, turn.valid_mask), dim=1)
-    success = approach.full_success & turn.full_success
+    ideal_turn_start = approach_success | fallback_success
+    success = ideal_turn_start & turn.full_success
     print(
         f"planning: {planning_time:.3f}s; "
         f"approach {int(approach.full_success.sum())}/{NUM_ENVIRONMENTS}; "
+        f"ideal fallback {int(fallback_success.sum())}/{int(failed_indices.numel())}; "
         f"turn {int(turn.full_success.sum())}/{NUM_ENVIRONMENTS}; "
-        f"full {int(success.sum())}/{NUM_ENVIRONMENTS}"
+        f"turn-chain {int(success.sum())}/{NUM_ENVIRONMENTS}"
     )
 
     score = None

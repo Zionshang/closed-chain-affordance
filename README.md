@@ -76,11 +76,18 @@ valid_steps = result.valid_mask       # [B, 11]
 ```
 
 `PlannerConfig` controls convergence: `accuracy`,
+`secondary_goal_min_magnitude`, `secondary_goal_abs_tolerance`,
 `closure_err_threshold_ang`, `closure_err_threshold_lin`, `ik_max_itr`, and
-`update_method`. By default the package uses fixed iterations
+`update_method`. Exact zero secondary goals remain zero; the independent
+absolute tolerance prevents small goals from demanding unrealistic relative
+precision. By default the package uses fixed iterations
 (`fast_mode=True`, no early stop), the fast linear solver, and no
 `torch.compile`. Call `enable_chunked_early_stop()` if host-side convergence
 checks are desirable.
+
+`PlannerInterface.solve_pose_ik()` provides batched damped-least-squares
+endpoint IK and returns `(joint_states, converged)`. It can resolve a Cartesian
+canonical pose independently of trajectory-planning success.
 
 ## Examples
 

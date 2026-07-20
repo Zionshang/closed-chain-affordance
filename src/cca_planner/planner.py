@@ -224,9 +224,15 @@ class Planner:
         self.max_itr_l_ = planner_config.ik_max_itr
         self.update_method_ = planner_config.update_method
 
+        if planner_config.secondary_goal_min_magnitude < 0.0:
+            raise ValueError("secondary_goal_min_magnitude must be >= 0")
+        if planner_config.secondary_goal_abs_tolerance <= 0.0:
+            raise ValueError("secondary_goal_abs_tolerance must be > 0")
+        self.secondary_goal_min_magnitude_ = planner_config.secondary_goal_min_magnitude
+        self.secondary_goal_abs_tolerance_ = planner_config.secondary_goal_abs_tolerance
+
         self.cond_N_threshold_ = 100.0
         self.lambda_ = 1.1
-        self.goal_min_ = 1e-5
         # Torch defaults favour batched throughput: fixed iteration count and
         # the regularised SVD-free linear solver. torch.compile remains opt-in
         # because its one-time compilation cost can dominate small-matrix jobs.
@@ -341,7 +347,14 @@ class Planner:
         n_p = cc_slist.shape[-1] - task_offset_tau  # primary (robot) joints
         n_s = task_offset_tau  # secondary joints
 
-        theta_sdf = M.clamp_to_magnitude_minimum(theta_sdf, self.goal_min_)  # [B, tau]
+        # Regularise genuinely non-zero goals without turning an exact zero into
+        # a small motion command. Goal magnitude and convergence tolerance are
+        # deliberately independent configuration concepts.
+        theta_sdf = M.clamp_to_magnitude_minimum(
+            theta_sdf,
+            self.secondary_goal_min_magnitude_,
+            preserve_zero=True,
+        )  # [B, tau]
 
         m = int(stepper_max_itr_m)
         theta_adf = theta_sdf[..., -1]  # [B]
@@ -352,6 +365,7 @@ class Planner:
         theta_s_tol[..., -1] = (self.accuracy_ * deltatheta_a).abs()
         if has_approach:
             theta_s_tol[..., -2] = (self.accuracy_ * deltatheta_p).abs()
+        theta_s_tol = theta_s_tol.clamp_min(self.secondary_goal_abs_tolerance_)
 
         theta_sd = theta_sdf.clone()
         theta_sd[..., -1] = 0.0
@@ -718,6 +732,95 @@ class PlannerInterface:
         """Enable the regularised, SVD-free linear solver for throughput workloads."""
         self.planner_.enable_fast_linear_solver(enabled)
         return self
+
+    @torch.inference_mode()
+    def solve_pose_ik(
+        self,
+        *,
+        robot_slist: torch.Tensor,
+        robot_m: torch.Tensor,
+        joint_seed: torch.Tensor,
+        target_pose: torch.Tensor,
+        max_iterations: int = 100,
+        angular_tolerance: float = 1e-3,
+        linear_tolerance: float = 1e-3,
+        damping: float = 1e-2,
+        max_joint_step: float = 0.25,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Solve batched damped-least-squares pose IK.
+
+        Returns ``(joint_states, converged)``. Shared ``robot_slist`` and
+        ``robot_m`` inputs are broadcast to the batch of ``joint_seed``;
+        ``target_pose`` may likewise be shared or batched. This endpoint IK is
+        useful for obtaining a canonical task-start configuration independently
+        of whether a preceding trajectory reached that pose.
+        """
+        if joint_seed.ndim == 1:
+            joint_seed = joint_seed.unsqueeze(0)
+        elif joint_seed.ndim != 2:
+            raise ValueError("joint_seed must have shape [n_robot] or [B, n_robot]")
+        batch = joint_seed.shape[0]
+        slist = _as_batched(robot_slist, batch, 2, "robot_slist")
+        robot_m = _as_batched(robot_m, batch, 2, "robot_m")
+        target_pose = _as_batched(target_pose, batch, 2, "target_pose")
+
+        if slist.shape[-2] != _TWIST_LENGTH or slist.shape[-1] != joint_seed.shape[-1]:
+            raise ValueError("robot_slist must have shape [B, 6, n_robot] matching joint_seed")
+        if robot_m.shape[-2:] != (4, 4) or target_pose.shape[-2:] != (4, 4):
+            raise ValueError("robot_m and target_pose must have shape [B, 4, 4]")
+        for name, tensor in (
+            ("robot_slist", slist),
+            ("robot_m", robot_m),
+            ("target_pose", target_pose),
+        ):
+            _require_compatible(tensor, joint_seed, name)
+        if max_iterations < 1:
+            raise ValueError("max_iterations must be >= 1")
+        if angular_tolerance <= 0.0 or linear_tolerance <= 0.0:
+            raise ValueError("pose IK tolerances must be > 0")
+        if damping <= 0.0 or max_joint_step <= 0.0:
+            raise ValueError("damping and max_joint_step must be > 0")
+
+        joints = joint_seed.clone()
+        eye6 = torch.eye(_TWIST_LENGTH, dtype=joints.dtype, device=joints.device)
+
+        for _ in range(int(max_iterations)):
+            current_pose = M.fkin_space(robot_m, slist, joints)
+            body_error = M.se3_to_vec(
+                M.matrix_log6(M.trans_inv(current_pose) @ target_pose)
+            )
+            space_error = (
+                M.adjoint(current_pose) @ body_error.unsqueeze(-1)
+            ).squeeze(-1)
+            active = (
+                space_error[..., :3].norm(dim=-1) > angular_tolerance
+            ) | (space_error[..., 3:].norm(dim=-1) > linear_tolerance)
+            if not bool(active.any()):
+                break
+
+            jacobian = M.jacobian_space(slist, joints)
+            gram = jacobian @ jacobian.transpose(-2, -1)
+            dual = torch.linalg.solve_ex(
+                gram + damping**2 * eye6,
+                space_error.unsqueeze(-1),
+            ).result
+            joint_step = (
+                jacobian.transpose(-2, -1) @ dual
+            ).squeeze(-1)
+            step_norm = joint_step.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+            joint_step = joint_step * torch.clamp(
+                max_joint_step / step_norm, max=1.0
+            )
+            joints = torch.where(active[..., None], joints + joint_step, joints)
+
+        current_pose = M.fkin_space(robot_m, slist, joints)
+        final_error = M.se3_to_vec(
+            M.matrix_log6(M.trans_inv(current_pose) @ target_pose)
+        )
+        converged = (
+            final_error[..., :3].norm(dim=-1) <= angular_tolerance
+        ) & (final_error[..., 3:].norm(dim=-1) <= linear_tolerance)
+        return joints, converged
 
     @torch.inference_mode()
     def generate_joint_trajectory(

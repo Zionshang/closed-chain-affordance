@@ -300,9 +300,22 @@ def jacobian_space(slist: torch.Tensor, thetalist: torch.Tensor) -> torch.Tensor
 # --------------------------------------------------------------------------- #
 # Misc
 # --------------------------------------------------------------------------- #
-def clamp_to_magnitude_minimum(mat: torch.Tensor, min_magnitude: float) -> torch.Tensor:
-    """Clamp each element to at least ``min_magnitude`` in magnitude, sign-preserving."""
+def clamp_to_magnitude_minimum(
+    mat: torch.Tensor,
+    min_magnitude: float,
+    *,
+    preserve_zero: bool = False,
+) -> torch.Tensor:
+    """Clamp magnitudes while preserving signs.
+
+    By default zero follows the established behaviour and becomes positive
+    ``min_magnitude``. Set ``preserve_zero=True`` when zero has semantic meaning
+    (for example, a secondary joint that must not move).
+    """
     signs = torch.sign(mat)
     signs = torch.where(signs == 0.0, torch.ones_like(signs), signs)
     magnitudes = torch.clamp(mat.abs(), min=min_magnitude)
-    return signs * magnitudes
+    clamped = signs * magnitudes
+    if preserve_zero:
+        clamped = torch.where(mat == 0.0, mat, clamped)
+    return clamped

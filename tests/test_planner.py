@@ -100,6 +100,82 @@ class PlannerTests(unittest.TestCase):
         )
         self.assertTrue(bool((result.executed_iterations == config.ik_max_itr).all()))
 
+    def test_zero_goal_remains_zero_and_uses_absolute_tolerance(self):
+        config = cca.PlannerConfig(
+            ik_max_itr=8,
+            update_method=cca.UpdateMethod.INVERSE,
+            secondary_goal_abs_tolerance=1e-3,
+        )
+        interface = cca.PlannerInterface(config)
+        result = interface.generate_joint_trajectory(
+            **self._turn_inputs(torch.zeros(2, dtype=torch.float64))
+        )
+        self.assertTrue(bool(result.full_success.all()))
+        self.assertTrue(bool((result.active_iterations == 0).all()))
+        torch.testing.assert_close(
+            result.joint_trajectory,
+            self.robot.joint_states.expand(2, 5, -1),
+        )
+
+    def test_approach_reaches_canonical_pose_with_zero_affordance(self):
+        q = self.robot.joint_states.unsqueeze(0)
+        start_pose = cca.fkin_space(self.robot.M, self.robot.slist, q)
+        canonical_pose = start_pose.clone()
+        canonical_pose[:, 1, 3] += 0.02
+        axis = torch.tensor([[1.0, 0.0, 0.0]], dtype=q.dtype)
+        affordance_screw = cca.get_screw(
+            cca.ScrewType.ROTATION, axis, start_pose[:, :3, 3]
+        )
+        config = cca.PlannerConfig(
+            ik_max_itr=40,
+            update_method=cca.UpdateMethod.INVERSE,
+            secondary_goal_abs_tolerance=1e-4,
+            closure_err_threshold_lin=1e-4,
+        )
+        result = cca.PlannerInterface(config, **REFERENCE_MODE).generate_joint_trajectory(
+            robot_slist=self.robot.slist,
+            robot_m=self.robot.M,
+            joint_states=q,
+            motion_type=cca.MotionType.APPROACH,
+            affordance_screw=affordance_screw,
+            goal_affordance=torch.zeros(1, dtype=q.dtype),
+            trajectory_density=5,
+            vir_screw_order=cca.VirtualScrewOrder.NONE,
+            canonical_pose=canonical_pose,
+        )
+        self.assertTrue(bool(result.full_success.all()))
+        end_pose = cca.fkin_space(
+            self.robot.M, self.robot.slist, result.joint_trajectory[:, -1]
+        )
+        self.assertLess(
+            float((end_pose[:, :3, 3] - canonical_pose[:, :3, 3]).norm()),
+            1e-3,
+        )
+
+    def test_pose_ik_interface_reaches_batched_targets(self):
+        batch = 2
+        q = self.robot.joint_states.expand(batch, -1).clone()
+        target_pose = cca.fkin_space(self.robot.M, self.robot.slist, q)
+        target_pose[:, 1, 3] += torch.tensor([0.01, 0.02], dtype=q.dtype)
+        interface = cca.PlannerInterface(
+            cca.PlannerConfig(update_method=cca.UpdateMethod.INVERSE),
+            **REFERENCE_MODE,
+        )
+        joints, converged = interface.solve_pose_ik(
+            robot_slist=self.robot.slist,
+            robot_m=self.robot.M,
+            joint_seed=q,
+            target_pose=target_pose,
+            linear_tolerance=1e-4,
+        )
+        self.assertTrue(bool(converged.all()))
+        solved_pose = cca.fkin_space(self.robot.M, self.robot.slist, joints)
+        error = cca.se3_to_vec(
+            cca.matrix_log6(cca.trans_inv(solved_pose) @ target_pose)
+        )
+        self.assertLess(float(error[:, :3].norm(dim=-1).max()), 1e-3)
+        self.assertLess(float(error[:, 3:].norm(dim=-1).max()), 1e-4)
+
     def test_mixed_gripper_goal(self):
         inputs = self._turn_inputs(torch.tensor([0.2, 0.3], dtype=torch.float64))
         inputs["gripper_state"] = torch.tensor([0.1, 0.2], dtype=torch.float64)
