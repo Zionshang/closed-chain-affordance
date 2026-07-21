@@ -9,6 +9,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import math
 import time
 from pathlib import Path
 
@@ -28,7 +29,7 @@ DTYPE = torch.float32  # 规划张量精度
 NUM_ENVIRONMENTS = 4096  # 并行规划环境数
 VISUALIZE_COUNT = 32  # Viser 中显示的环境数
 TRAJECTORY_POINTS = 10  # 阀门旋转轨迹点数（IK 起点不生成接近轨迹）
-IK_ITERATIONS = 25  # 起点 IK 及每个 CCA 轨迹点的最大迭代次数
+IK_ITERATIONS = 50  # 起点 pose IK 的最大迭代次数
 SEED = 42  # 随机种子
 
 VALVE_POSITION = (0.55, 0.0, 0.24)  # 阀门中心的基准位置
@@ -41,6 +42,7 @@ VALVE_OUTER_DIAMETERS = (0.28, 0.32, 0.36)  # 可选阀门外径
 VALVE_RIM_DIAMETER = 0.035  # 外圈管材直径
 VALVE_AXIS = (1.0, 0.0, 0.0)  # 阀门旋转轴方向
 VALVE_UP = (0.0, 0.0, 1.0)  # 初始抓取点的径向方向
+GRASP_ROLL = torch.pi / 2  # TCP 局部 x 轴滚转 90°，使夹爪竖直夹住阀门顶部
 TURN_ANGLE = torch.pi  # 阀门目标转角
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -123,10 +125,17 @@ def main() -> None:
         NUM_ENVIRONMENTS, -1
     )
     grasp_points = centres + grasp_radii.unsqueeze(-1) * up
-    # The canonical contact pose keeps the current TCP orientation and moves to
-    # the valve rim. A large simultaneous reorientation from Piper's singular
-    # zero configuration should be planned as a separate stage.
+    grasp_roll_rotation = torch.tensor(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, math.cos(GRASP_ROLL), -math.sin(GRASP_ROLL)],
+            [0.0, math.sin(GRASP_ROLL), math.cos(GRASP_ROLL)],
+        ],
+        device=DEVICE,
+        dtype=DTYPE,
+    )
     canonical_pose = initial_pose.clone()
+    canonical_pose[:, :3, :3] = initial_pose[:, :3, :3] @ grasp_roll_rotation
     canonical_pose[:, :3, 3] = grasp_points
 
     valve_axes = torch.tensor(VALVE_AXIS, device=DEVICE, dtype=DTYPE).expand(
@@ -144,8 +153,8 @@ def main() -> None:
         joint_seed=initial_joints,
         target_pose=canonical_pose,
         max_iterations=IK_ITERATIONS,
-        angular_tolerance=5e-4,
-        linear_tolerance=5e-4,
+        angular_tolerance=6e-4,
+        linear_tolerance=6e-4,
     )
 
     turn_angles = torch.full(
