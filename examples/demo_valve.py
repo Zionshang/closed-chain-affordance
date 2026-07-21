@@ -42,7 +42,7 @@ VALVE_OUTER_DIAMETERS = (0.28, 0.32, 0.36)  # 可选阀门外径
 VALVE_RIM_DIAMETER = 0.035  # 外圈管材直径
 VALVE_AXIS = (1.0, 0.0, 0.0)  # 阀门旋转轴方向
 VALVE_UP = (0.0, 0.0, 1.0)  # 初始抓取点的径向方向
-GRASP_ROLL = torch.pi / 2  # TCP 局部 x 轴滚转 90°，使夹爪竖直夹住阀门顶部
+GRASP_ROLL = -torch.pi / 2  # +pi 转动从局部 x 轴 -90° 起步，避免腕部关节超过限位
 TURN_ANGLE = torch.pi  # 阀门目标转角
 
 torch.backends.cuda.matmul.allow_tf32 = True
