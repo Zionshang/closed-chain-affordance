@@ -27,8 +27,8 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # 规划�
 DTYPE = torch.float32  # 规划张量精度
 NUM_ENVIRONMENTS = 4096  # 并行规划环境数
 VISUALIZE_COUNT = 32  # Viser 中显示的环境数
-TRAJECTORY_POINTS = 6  # 每个阶段的轨迹点数
-IK_ITERATIONS = 25  # 每个轨迹点的最大 IK 迭代次数
+TRAJECTORY_POINTS = 10  # 阀门旋转轨迹点数（IK 起点不生成接近轨迹）
+IK_ITERATIONS = 25  # 起点 IK 及每个 CCA 轨迹点的最大迭代次数
 SEED = 42  # 随机种子
 
 VALVE_POSITION = (0.55, 0.0, 0.24)  # 阀门中心的基准位置
@@ -138,41 +138,19 @@ def main() -> None:
         torch.cuda.synchronize(DEVICE)
     start_time = time.perf_counter()
 
-    approach = planner.generate_joint_trajectory(
+    turn_start_joints, ik_success = planner.solve_pose_ik(
         robot_slist=robot.slist,
         robot_m=robot.M,
-        joint_states=initial_joints,
-        motion_type=cca.MotionType.APPROACH,
-        affordance_screw=valve_screws,
-        goal_affordance=torch.zeros(
-            NUM_ENVIRONMENTS, device=DEVICE, dtype=DTYPE
-        ),
-        trajectory_density=TRAJECTORY_POINTS,
-        vir_screw_order=cca.VirtualScrewOrder.NONE,
-        canonical_pose=canonical_pose,
+        joint_seed=initial_joints,
+        target_pose=canonical_pose,
+        max_iterations=IK_ITERATIONS,
+        angular_tolerance=5e-4,
+        linear_tolerance=5e-4,
     )
 
     turn_angles = torch.full(
         (NUM_ENVIRONMENTS,), TURN_ANGLE, device=DEVICE, dtype=DTYPE
     )
-    approach_success = approach.full_success
-    approach_failed = ~approach_success
-    turn_start_joints = approach.joint_trajectory[:, -1].clone()
-    fallback_success = torch.zeros_like(approach_success)
-    failed_indices = torch.nonzero(approach_failed, as_tuple=False).squeeze(-1)
-    if failed_indices.numel() > 0:
-        ideal_joints, ideal_converged = planner.solve_pose_ik(
-            robot_slist=robot.slist,
-            robot_m=robot.M,
-            joint_seed=initial_joints[failed_indices],
-            target_pose=canonical_pose[failed_indices],
-        )
-        turn_start_joints[failed_indices] = ideal_joints
-        fallback_success[failed_indices] = ideal_converged
-
-    # Turn always continues. Failed approach environments start from a fresh IK
-    # solution of the specified ideal canonical pose, never from their failed
-    # closed-chain candidate.
     turn = planner.generate_joint_trajectory(
         robot_slist=robot.slist,
         robot_m=robot.M,
@@ -188,27 +166,21 @@ def main() -> None:
         torch.cuda.synchronize(DEVICE)
     planning_time = time.perf_counter() - start_time
 
-    approach_trajectory = approach.joint_trajectory.clone()
-    approach_trajectory[failed_indices, -1] = turn_start_joints[failed_indices]
-    trajectory = torch.cat(
-        (approach_trajectory, turn.joint_trajectory[:, 1:]), dim=1
-    )
-    valid = torch.cat((approach.valid_mask, turn.valid_mask), dim=1)
-    ideal_turn_start = approach_success | fallback_success
-    success = ideal_turn_start & turn.full_success
+    trajectory = turn.joint_trajectory
+    valid = turn.valid_mask & ik_success[:, None]
+    success = ik_success & turn.full_success
     print(
         f"planning: {planning_time:.3f}s; "
-        f"approach {int(approach.full_success.sum())}/{NUM_ENVIRONMENTS}; "
-        f"ideal fallback {int(fallback_success.sum())}/{int(failed_indices.numel())}; "
+        f"start IK {int(ik_success.sum())}/{NUM_ENVIRONMENTS}; "
         f"turn {int(turn.full_success.sum())}/{NUM_ENVIRONMENTS}; "
-        f"turn-chain {int(success.sum())}/{NUM_ENVIRONMENTS}"
+        f"full {int(success.sum())}/{NUM_ENVIRONMENTS}"
     )
 
     score = None
     if args.diagnose_errors:
         ee_poses = cca.fkin_space(robot.M, robot.slist, trajectory)
-        approach_error = torch.linalg.vector_norm(
-            ee_poses[:, TRAJECTORY_POINTS - 1, :3, 3] - grasp_points, dim=-1
+        start_error = torch.linalg.vector_norm(
+            ee_poses[:, 0, :3, 3] - grasp_points, dim=-1
         )
         final_grasp_points = centres - grasp_radii.unsqueeze(-1) * up
         turn_error = torch.linalg.vector_norm(
@@ -217,10 +189,10 @@ def main() -> None:
         waypoint_jump = torch.linalg.vector_norm(
             torch.diff(ee_poses[:, :, :3, 3], dim=1), dim=-1
         ).amax(dim=-1)
-        print_quantiles("approach endpoint error [m]", approach_error)
+        print_quantiles("start IK position error [m]", start_error)
         print_quantiles("turn endpoint error [m]", turn_error)
         print_quantiles("maximum TCP waypoint jump [m]", waypoint_jump)
-        score = torch.maximum(approach_error, turn_error)
+        score = torch.maximum(start_error, turn_error)
 
     if args.visualize:
         if score is None:
@@ -235,7 +207,7 @@ def main() -> None:
             centres[shown],
             0.5 * outer_diameters[shown],
             turn_angles[shown],
-            TRAJECTORY_POINTS,
+            1,
             rotation_axis=VALVE_AXIS,
             grasp_direction=VALVE_UP,
         )

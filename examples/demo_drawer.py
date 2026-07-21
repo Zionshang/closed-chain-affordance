@@ -1,4 +1,4 @@
-"""Approach drawer handles and pull them open. Run: python examples/demo_drawer.py"""
+"""Solve drawer-handle IK and plan the pull. Run: python examples/demo_drawer.py"""
 
 from pathlib import Path
 
@@ -16,6 +16,7 @@ DTYPE = torch.float32
 NUM_ENVIRONMENTS = 64
 TRAJECTORY_POINTS = 12
 IK_ITERATIONS = 30
+POSE_IK_ITERATIONS = 300
 PULL_AXIS = (-1.0, 0.0, 0.0)  # Cabinet is in +x; pull toward the robot.
 
 
@@ -48,33 +49,23 @@ def main():
     handle_positions = grasp_poses[:, :3, 3]
     initial_joints = robot.joint_states.expand(NUM_ENVIRONMENTS, -1).clone()
 
-    # Stage 1: move the TCP to each drawer handle.
-    reference_axis = torch.ones(NUM_ENVIRONMENTS, 3, device=DEVICE, dtype=DTYPE)
-    reference_axis /= torch.linalg.vector_norm(reference_axis, dim=-1, keepdim=True)
-    approach = planner.generate_joint_trajectory(
+    # Solve the handle-contact configuration directly; CCA starts at contact.
+    grasp_joints, ik_success = planner.solve_pose_ik(
         robot_slist=robot.slist,
         robot_m=robot.M,
-        joint_states=initial_joints,
-        motion_type=cca.MotionType.APPROACH,
-        affordance_screw=cca.get_screw(
-            cca.ScrewType.ROTATION, reference_axis, torch.ones_like(reference_axis)
-        ),
-        goal_affordance=torch.full(
-            (NUM_ENVIRONMENTS,), 1e-5, device=DEVICE, dtype=DTYPE
-        ),
-        trajectory_density=TRAJECTORY_POINTS,
-        vir_screw_order=cca.VirtualScrewOrder.NONE,
-        canonical_pose=grasp_poses,
+        joint_seed=initial_joints,
+        target_pose=grasp_poses,
+        max_iterations=POSE_IK_ITERATIONS,
     )
 
-    # Stage 2: translate each drawer along its opening axis.
+    # Plan only the constrained drawer translation from the IK contact state.
     pull_axes = torch.tensor(PULL_AXIS, device=DEVICE, dtype=DTYPE).expand(
         NUM_ENVIRONMENTS, -1
     )
     pull = planner.generate_joint_trajectory(
         robot_slist=robot.slist,
         robot_m=robot.M,
-        joint_states=approach.joint_trajectory[:, -1, :6],
+        joint_states=grasp_joints,
         motion_type=cca.MotionType.AFFORDANCE,
         affordance_screw=cca.get_screw(
             cca.ScrewType.TRANSLATION, pull_axes, handle_positions
@@ -84,13 +75,17 @@ def main():
         vir_screw_order=cca.VirtualScrewOrder.XYZ,
     )
 
-    trajectory = torch.cat([approach.joint_trajectory, pull.joint_trajectory[:, 1:]], 1)
-    valid = torch.cat([approach.valid_mask, pull.valid_mask], 1)
-    success = approach.full_success & pull.full_success
-    print(f"drawer: {int(success.sum())}/{NUM_ENVIRONMENTS} full trajectories")
+    trajectory = pull.joint_trajectory
+    valid = pull.valid_mask & ik_success[:, None]
+    success = ik_success & pull.full_success
+    print(
+        f"drawer: start IK {int(ik_success.sum())}/{NUM_ENVIRONMENTS}; "
+        f"pull {int(pull.full_success.sum())}/{NUM_ENVIRONMENTS}; "
+        f"full {int(success.sum())}/{NUM_ENVIRONMENTS}"
+    )
     ViserVisualizer(robot, URDF, config=VisualizationConfig(port=8081)).show_drawers(
         trajectory, valid, success, handle_positions, pull_distances,
-        TRAJECTORY_POINTS, pull_axis=PULL_AXIS,
+        1, pull_axis=PULL_AXIS,
     )
 
 

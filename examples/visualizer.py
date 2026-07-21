@@ -307,7 +307,7 @@ class ViserVisualizer:
         grasp_direction=(0.0, 0.0, 1.0),
         rim_points=48,
     ):
-        """Visualize an approach followed by valve rotation."""
+        """Visualize valve rotation, optionally preceded by an approach."""
         steps = as_numpy(joint_trajectory).shape[1]
         self.show(
             joint_trajectory,
@@ -343,7 +343,7 @@ class ViserVisualizer:
         drawer_front_thickness=0.025,
         handle_dimensions=(0.035, 0.14, 0.025),
     ):
-        """Visualize an approach followed by drawer translation."""
+        """Visualize drawer translation, optionally preceded by an approach."""
         steps = as_numpy(joint_trajectory).shape[1]
         self.show(
             joint_trajectory,

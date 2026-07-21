@@ -91,10 +91,10 @@ canonical pose independently of trajectory-planning success.
 
 ## Examples
 
-- [`examples/demo_valve.py`](examples/demo_valve.py): approach randomized valve
-  rims, then turn each valve around its rotation screw.
-- [`examples/demo_drawer.py`](examples/demo_drawer.py): approach randomized
-  drawer handles, then pull each drawer along its translation screw.
+- [`examples/demo_valve.py`](examples/demo_valve.py): solve randomized valve-rim
+  contact poses with batched IK, then plan each turn around its rotation screw.
+- [`examples/demo_drawer.py`](examples/demo_drawer.py): solve randomized handle
+  contact poses with batched IK, then plan each pull along its translation screw.
 
 Each script contains its complete minimal planning flow. Only the reusable
 [`ViserVisualizer`](examples/visualizer.py) is shared. Run them with:

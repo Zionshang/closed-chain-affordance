@@ -132,10 +132,10 @@ AFFORDANCE 的统一任务描述：
 
 ## 示例
 
-- [`examples/demo_valve.py`](examples/demo_valve.py)：先接近随机化的阀门抓取点，
-  再沿旋转螺旋轴扭转阀门。
-- [`examples/demo_drawer.py`](examples/demo_drawer.py)：先接近随机化的抽屉把手，
-  再沿平移螺旋轴将抽屉拉开。
+- [`examples/demo_valve.py`](examples/demo_valve.py)：先用批量 IK 求随机阀门抓取点，
+  再沿旋转螺旋轴规划阀门转动。
+- [`examples/demo_drawer.py`](examples/demo_drawer.py)：先用批量 IK 求随机抽屉把手抓取点，
+  再沿平移螺旋轴规划抽屉拉动。
 
 每个脚本都独立包含完整的最小规划流程；只有机器人网格、物体几何、轨迹着色和动画
 共用 [`ViserVisualizer`](examples/visualizer.py)。
