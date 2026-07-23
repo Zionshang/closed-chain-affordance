@@ -14,7 +14,7 @@ VALVE_OPEN_ANGLE_RAD = np.pi
 def build_x5_robot_description() -> cca.RobotDescription:
     repo_root = Path(__file__).resolve().parents[1]
     urdf_path = repo_root / "assets" / "robot" / "x5" / "urdf" / "x5.urdf"
-    config_path = repo_root / "python" / "x5_urdf_config.yaml"
+    config_path = repo_root / "examples" / "x5_urdf_config.yaml"
 
     return cca.build_robot_description_from_urdf(
         str(urdf_path),

@@ -294,7 +294,7 @@ def robot_builder_from_urdf(urdf_string: str, robot_config: RobotConfig) -> Robo
 
 
 # --------------------------------------------------------------------------- #
-# Binding-level convenience builders -> RobotDescription
+# Public convenience builders -> RobotDescription
 # --------------------------------------------------------------------------- #
 def _robot_description_from_config(
     robot_config: RobotConfig, joint_states, gripper_state: float

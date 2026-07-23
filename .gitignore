@@ -1,9 +1,20 @@
-#ignore swap files created by vim
+# Editor files
 *.sw*
-# all build folders
+.codex/
+.vscode/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Packaging output
 build/
-.codex
-.vscode
-**.so
-__pycache__
-*.egg-info
+dist/
+*.egg-info/

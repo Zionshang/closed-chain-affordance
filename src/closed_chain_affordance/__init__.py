@@ -1,9 +1,7 @@
 """Pure-Python implementation of the Closed-Chain Affordance (CCA) framework.
 
-This package is a from-scratch Python reimplementation of the original C++ /
-pybind11 library. It exposes the same public API (module name, enums, classes
-and free functions) so that code written against the compiled bindings keeps
-working unchanged:
+The package exposes a compact NumPy-based API for building robot descriptions,
+describing approach or affordance tasks, and generating joint trajectories:
 
     import closed_chain_affordance as cca
 
@@ -69,7 +67,7 @@ __all__ = [
     # planner
     "CcAffordancePlannerInterface",
     "plan",
-    # free functions (binding parity)
+    # free functions
     "axis_to_vec",
     "get_screw",
     "fkin_space",

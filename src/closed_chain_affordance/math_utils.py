@@ -1,14 +1,12 @@
 """Rigid-body math utilities (Modern Robotics conventions).
 
-This module is a pure-Python translation of the ``affordance_util`` math
-helpers that were originally implemented with Eigen in C++. The rotation
-exponential/logarithm (SO(3)) operations lean on :mod:`scipy.spatial.transform`
-as requested, while the SE(3)-specific formulas (matrix exponential/logarithm
-of a twist, adjoint, forward kinematics, space Jacobian) are implemented with
-NumPy since there is no single library call for them.
+The rotation exponential/logarithm (SO(3)) operations lean on
+:mod:`scipy.spatial.transform`, while the SE(3)-specific formulas (matrix
+exponential/logarithm of a twist, adjoint, forward kinematics and space
+Jacobian) are implemented with NumPy.
 
 All vectors are 1-D ``numpy.ndarray`` and all transforms are 4x4 homogeneous
-matrices, matching the Eigen layout of the original code.
+matrices.
 """
 
 from __future__ import annotations
@@ -16,8 +14,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-# Tolerance used to decide whether a scalar is effectively zero (matches the
-# 1e-6 constant used by NearZero in the C++ implementation).
+# Tolerance used to decide whether a scalar is effectively zero.
 _NEAR_ZERO_TOL = 1e-6
 
 
@@ -70,7 +67,7 @@ def matrix_log3(rot: np.ndarray) -> np.ndarray:
 
     Uses the closed-form Modern Robotics formula with explicit handling of the
     0 and pi rotation cases so that the identity maps to an exact zero matrix
-    (matching the C++ implementation and avoiding division by zero downstream).
+    and avoids division by zero downstream.
     """
     rot = np.asarray(rot, dtype=float)
     acosinput = (np.trace(rot) - 1.0) / 2.0
@@ -224,8 +221,7 @@ def jacobian_space(slist: np.ndarray, thetalist: np.ndarray) -> np.ndarray:
 def clamp_to_magnitude_minimum(mat: np.ndarray, min_magnitude: float) -> np.ndarray:
     """Clamp each element to at least ``min_magnitude`` while preserving sign.
 
-    Zero values are pushed to positive ``min_magnitude`` (matching the C++
-    behaviour where ``cwiseSign`` of zero is treated as positive).
+    Zero values are pushed to positive ``min_magnitude``.
     """
     mat = np.asarray(mat, dtype=float)
     signs = np.sign(mat)

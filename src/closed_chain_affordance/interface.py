@@ -210,10 +210,8 @@ class CcAffordancePlannerInterface:
     ) -> PlannerResult:
         """Run inverse and transpose planners concurrently; return the better result.
 
-        Mirrors the C++ ``BEST`` mode: the first planner to produce a FULL
-        trajectory wins and signals the other to stop; otherwise the fuller
-        partial trajectory is returned. The ``update_trail`` strings reproduce
-        the C++ diagnostics.
+        The first planner to produce a FULL trajectory wins and signals the
+        other to stop; otherwise the fuller partial trajectory is returned.
         """
         results = {"inverse": PlannerResult(), "transpose": PlannerResult()}
         done = {"inverse": threading.Event(), "transpose": threading.Event()}

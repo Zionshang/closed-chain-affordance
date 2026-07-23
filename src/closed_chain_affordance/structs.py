@@ -1,9 +1,8 @@
-"""Plain data containers mirroring the C++ structs exposed by the bindings.
+"""Plain data containers used by the public planner interface.
 
 Every class has a default constructor that leaves optional fields in the same
-"unset" state as the original Eigen code (NaN-filled arrays, NaN scalars), so
-the validation logic can detect missing values with ``np.isnan`` exactly as the
-C++ implementation does.
+"unset" state with NaN-filled arrays and scalars, allowing validation logic to
+detect missing values consistently with ``np.isnan``.
 """
 
 from __future__ import annotations
@@ -136,7 +135,7 @@ class TaskDescription:
     def __init__(self, planning_type=_NO_PLANNING_TYPE) -> None:
         from .enums import PlanningType  # local import to avoid cycle at module load
 
-        # Defaults (match the C++ struct default member initializers).
+        # Public defaults for a generic affordance task.
         self.affordance_info: ScrewInfo = ScrewInfo()
         self.goal: Goal = Goal()
         self.trajectory_density: int = 10

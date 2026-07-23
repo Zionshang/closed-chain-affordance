@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,12 +7,13 @@ name = "closed-chain-affordance"
 version = "0.1.0"
 description = "Pure-Python implementation of the Closed-Chain Affordance planning framework"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.23",
     "scipy>=1.10",
-    "pyyaml>=6.0"
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -20,21 +21,10 @@ viewer = [
     "meshcat",
     "pin",
 ]
-dev = [
-    "pytest>=7",
-]
 
-[tool.setuptools]
-packages = ["closed_chain_affordance"]
-package-dir = { "" = "python" }
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["closed_chain_affordance*"]
 
 [tool.setuptools.package-data]
 closed_chain_affordance = ["py.typed", "*.pyi"]
-
-# NOTE: The original C++ / pybind11 implementation still lives under
-# affordance_util/, cc_affordance_planner/, and bindings/. It is no longer built
-# by `pip install .` (the pure-Python package above is the default), but it can
-# still be built as a reference for the equivalence tests under tests/ with:
-#   cmake -S . -B build -DPython3_EXECUTABLE=$(which python)
-#   cmake --build build -j4
-# then move python/closed_chain_affordance.so into tests/_cpp_ref/.

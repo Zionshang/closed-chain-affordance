@@ -1,15 +1,12 @@
 """The closed-chain affordance planner.
 
-Pure-Python translation of the ``cc_affordance_planner`` C++ classes. The base
-:class:`CcAffordancePlanner` implements the trajectory-stepping outer loop and
+The base :class:`CcAffordancePlanner` implements the trajectory-stepping outer loop and
 the closed-chain IK solver; :class:`CcAffordancePlannerTranspose` and
 :class:`CcAffordancePlannerInverse` provide the two update strategies for the
-primary joints (Newton-Raphson step). Pseudoinverses use ``numpy.linalg.pinv``
-in place of Eigen's complete-orthogonal-decomposition pseudoinverse.
+primary joints (Newton-Raphson step). Pseudoinverses use ``numpy.linalg.pinv``.
 
-Cooperative interruption (the C++ ``std::stop_token``) is reproduced with an
-optional :class:`threading.Event` so the ``BEST`` update method can stop the
-losing planner early, exactly as the concurrent C++ implementation does.
+Cooperative interruption uses an optional :class:`threading.Event` so the
+``BEST`` update method can stop the losing planner early.
 """
 
 from __future__ import annotations
@@ -50,7 +47,7 @@ class CcAffordancePlanner:
         self.max_itr_l_ = planner_config.ik_max_itr
 
         self.cond_N_threshold_ = 100.0
-        self.dls_flag_ = False  # persists across calls (matches C++ member behaviour)
+        self.dls_flag_ = False
         self.lambda_ = 1.1
         self.goal_min_ = 1e-5
 

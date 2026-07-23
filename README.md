@@ -1,367 +1,84 @@
-# Closed-Chain Affordance (CCA) Planning Framework
+# Closed-Chain Affordance Planner
 
-Can you think of a robot manipulation task in terms of an axis, a location, and a goal? For example:
-- Turning a valve 90 degrees about its central axis
-- Pulling a drawer 20 cm straight outwards to open it
-- Fastening a screw with a few turns, considering its axis and pitch
+A pure-Python implementation of the Closed-Chain Affordance (CCA) planning framework. It uses NumPy and SciPy for kinematics and closed-chain inverse kinematics, PyYAML for robot configuration, and the Python standard library for URDF parsing.
 
-Many common manipulation tasks can be approached this way. The **Closed-Chain Affordance (CCA) Framework** enables you to plan robot joint trajectories for such tasks using these intuitive inputs. Additionally, it offers the flexibility to:
-- **Control or free the end-effector (EE) orientation** along the task path
-- **Adjust the EE orientation while keeping its position fixed**, useful for tasks like reconfiguration, aligning objects, etc.
+CCA describes manipulation tasks using a screw axis, a location and a goal. Typical applications include turning a valve, pulling a drawer, following a Cartesian approach path and controlling end-effector orientation.
 
-This repository contains two C++ packages, `affordance_util` and `cc_affordance_planner`, which together form a standalone library framework for CCA. It utilizes the closed-chain affordance model described in the following IEEE Transactions on Robotics (T-RO) paper. A demonstration video showcasing simulation and real-world tasks is available [here](https://www.youtube.com/watch?v=Ukv93hbNrOM).
-
-## Paper Reference
-- Panthi, Janak, Farshid Alambeigi, and Mitch Pryor. "A Closed-Chain Approach to Generating Affordance Joint Trajectories for Robotic Manipulators." IEEE Transactions on Robotics (2025). [Link](https://ieeexplore.ieee.org/abstract/document/11049010)
-
-## Notable Dependencies
-1. `C++20`
-2. `eigen3`
-3. `urdfdom`
-4. `yaml-cpp`
-
-Install with `sudo apt install libyaml-cpp-dev liburdfdom-dev libeigen3-dev`
-
-## Installation Instructions
-Follow these steps to install the `affordance_util` and `cc_affordance_planner` libraries:
-
-1. Create a temporary directory and clone this repository in there:
-
-   ```bash
-   mkdir ~/temp_cca_ws && cd ~/temp_cca_ws
-   ```
-   ```
-   git clone git@github.com:UTNuclearRoboticsPublic/closed-chain-affordance.git
-   ```
-
-2. Build and install the `affordance_util` package.
-
-   ```bash
-   cd ~/temp_cca_ws/closed-chain-affordance/affordance_util/ && mkdir build && cd build && cmake .. -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_BUILD_TYPE=Release && cmake --build . && sudo cmake --install .
-   ```
-
-3. Build and install the `cc_affordance_planner` package.
-
-   ```bash
-   cd ~/temp_cca_ws/closed-chain-affordance/cc_affordance_planner/ && mkdir build && cd build && cmake .. -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_BUILD_TYPE=Release && cmake --build . && sudo cmake --install .
-   ```
-
-4. Remove the temporary directory along with this repo clone since we don't need them anymore:
-
-   ```bash
-   cd && rm -rf ~/temp_cca_ws
-   ```
-
-## Python Bindings
-
-This repository includes a pure-Python implementation and keeps the original
-`pybind11` extension as a reference for equivalence testing.
-
-### Python Environment
-
-Create or update the Conda environment from `environment.yml`:
-
-```bash
-conda env create -f environment.yml
-```
-
-If the environment already exists:
-
-```bash
-conda env update -f environment.yml
-```
-
-Then activate it:
-
-```bash
-conda activate cca
-```
-
-The environment currently includes:
-- `pybind11` for building the extension
-- `meshcat-python` for visualization
-- `pinocchio` for URDF-based MeshCat visualization
-
-### Install with pip (pure-Python package)
-
-The Python interface is implemented in pure Python (NumPy + SciPy + PyYAML) and
-lives under `python/closed_chain_affordance/`. No C++ build is required to use
-it. From the repository root:
+## Installation
 
 ```bash
 pip install .
 ```
 
-For an editable install during development:
+For editable development:
 
 ```bash
 pip install -e .
 ```
 
-If you also want the visualization dependencies:
+MeshCat visualization is optional:
 
 ```bash
-pip install ".[viewer]"
+pip install -e ".[viewer]"
 ```
 
-This installs the package as `closed-chain-affordance`, and the importable Python module is `closed_chain_affordance`:
+## Quick start
 
 ```python
+from pathlib import Path
+
+import numpy as np
 import closed_chain_affordance as cca
+
+root = Path.cwd()
+robot = cca.build_robot_description_from_urdf(
+    str(root / "assets/robot/x5/urdf/x5.urdf"),
+    str(root / "examples/x5_urdf_config.yaml"),
+    joint_states=np.zeros(6),
+)
+
+task = cca.TaskDescription()
+task.affordance_info.type = cca.ScrewType.ROTATION
+task.affordance_info.axis = cca.axis_to_vec(cca.Axis.X_MINUS)
+
+tcp_pose = cca.fkin_space(robot.M, robot.slist, robot.joint_states)
+task.affordance_info.location = tcp_pose[:3, 3] + np.array([0.0, 0.0, -0.08])
+task.goal.affordance = np.pi
+task.trajectory_density = 20
+
+config = cca.PlannerConfig()
+config.update_method = cca.UpdateMethod.INVERSE
+result = cca.plan(robot, task, config)
+
+print(result.success)
+print(result.trajectory_description)
 ```
 
-### Build the C++ reference binding (optional)
+## Example
 
-The original C++ / pybind11 implementation under `affordance_util/`,
-`cc_affordance_planner/`, and `bindings/` is kept as a reference for the
-equivalence tests. It is **not** needed to use the pure-Python package. To build
-it and stage it for the tests:
+The x5 example plans a Cartesian approach followed by a valve rotation:
 
 ```bash
-sudo apt install libyaml-cpp-dev liburdfdom-dev libeigen3-dev   # one-time system deps
-cmake -S . -B build -DPython3_EXECUTABLE=$(which python)
-cmake --build build -j4
-mkdir -p tests/_cpp_ref
-mv python/closed_chain_affordance.so tests/_cpp_ref/   # keep it out of the package path
+python examples/demo_x5_urdf.py
 ```
 
-### Equivalence Tests (C++ binding vs. pure Python)
-
-`tests/test_cpp_python_equivalence.py` drives both implementations with
-identical inputs and asserts the planned joint trajectories match. Each scenario
-runs in its own subprocess (one importing only the C++ binding, one importing
-only the pure-Python package), which avoids the BLAS/LAPACK conflict that occurs
-when Eigen (via the binding) and OpenBLAS (via NumPy) share a single process.
+To animate the result in MeshCat:
 
 ```bash
-python tests/test_cpp_python_equivalence.py
-# or: pytest tests/test_cpp_python_equivalence.py -q
+python examples/demo_x5_urdf.py --viewer
 ```
 
-On converging scenarios the trajectories agree to floating-point precision
-(rotation/translation/screw: ≤ ~1e-13; the x5 Cartesian approach: ~1e-7 from
-pseudoinverse round-off accumulating across the IK steps). The `BEST` update
-method is compared structurally (success / description / length) since the
-winning planner is scheduling-dependent.
+The first point in `result.joint_trajectory` is the starting state. Later points also contain internal virtual closed-chain joints; select the first `n` values when sending commands to an `n`-joint robot.
 
-### Run the Python Demos
+## Project layout
 
-Run the x5 URDF demo (planning only):
-
-```bash
-python python/demo_x5_urdf.py
+```text
+src/closed_chain_affordance/  Python package
+examples/                     Example and viewer
+assets/                       x5 URDF and meshes
+pyproject.toml                Build and dependency configuration
 ```
 
-Run the x5 URDF demo with the Pinocchio MeshCat viewer:
+## Reference
 
-```bash
-python -u python/demo_x5_urdf.py --viewer
-```
-
-## ROS2 Implementation
-
-The planner is designed for direct use in your C++ project (see the Usage section below). However, for easier implementation on physical robots, a ROS2 interface (essentially a wrapper around this C++ library) is available. Additionally, an optional user-friendly RViz plugin is provided for intuitive, code-free planning and execution.
-
-👉 [ROS2 Implementation Instructions](https://github.com/UTNuclearRoboticsPublic/closed_chain_affordance_ros.git)
-
-## Usage Information
-This section provides detailed instructions on configuring your project's CMakeLists.txt file (see Housekeeping) and writing code (see Code) to utilize the planner.
-
-### Housekeeping
-You can include these libraries in your cpp project by including the following in your `CMakeLists.txt`.
-```bash
-find_package(affordance_util REQUIRED)
-find_package(cc_affordance_planner REQUIRED)
-```
-
-Link against your targets as:
-```bash
-target_link_libraries(<target_name> PUBLIC affordance_util::affordance_util PUBLIC cc_affordance_planner::cc_affordance_planner)
-```
-
-### Code
-This section describes the required and optional code setup for this planner.
-#### Required Setup
-Using the planner is straightforward and requires just instantiating the planner interface object and calling a method on it by passing robot and task descriptions. Follow these 5 steps:
-1. Include these headers:
-```cpp
-#include <affordance_util/affordance_util.hpp>
-#include <cc_affordance_planner/cc_affordance_planner.hpp>
-#include <cc_affordance_planner/cc_affordance_planner_interface.hpp>
-```
-2. Instantiate the planner interface object:
-```cpp
-cc_affordance_planner::CcAffordancePlannerInterface ccAffordancePlannerInterface;
-```
-3. Provide the robot description. You can generate this automatically from a URDF or YAML file using the `affordance_util::robot_builder` functions. Sample YAML and URDF files are available in `affordance_util/src/test`. If you'd prefer to manually specify the description, you can do so as follows:
-
-```cpp
-affordance_util::RobotDescription robot_description;
-robot_description.slist = ; // Eigen::MatrixXd with robot joint screws as its columns in order
-robot_description.M = ; // Eigen::Matrix4d representing the homogenous transformation matrix for the EE (palm) at home position
-robot_description.joint_states = ; // Eigen::VectorXd representing the joint states of the robot in order at the start config of the affordance
-```
-
-4. Furnish task description. Here is an example for rotation motion. More examples in Task Examples section.
-```cpp
-cc_affordance_planner::TaskDescription task_description;
-
-// Affordance
-affordance_util::ScrewInfo aff;
-aff.type = affordance_util::ScrewType::ROTATION; // Possible values are ROTATION, TRANSLATION, SCREW
-aff.axis = Eigen::Vector3d(1, 0, 0); // Eigen::Vector3d representing the affordance screw axis, [1,0,0] for example
-aff.location = Eigen::Vector3d(0, 0, 0); // Eigen::Vector3d representing the location of the affordance screw axis, [0,0,0] for example
-
-task_description.affordance_info = aff;
-
-// Goals
-task_description.goal.affordance = 0.4; // Goal for the affordance, 0.4 for instance
-```
-Here is an example for planning EE orientation adjustment about reference frame `x-axis` while keeping its position fixed.
-
-```cpp
-cc_affordance_planner::TaskDescription task_description(cc_affordance_planner::PlanningType::EE_ORIENTATION_ONLY);
-req.task_description.affordance_info.axis = Eigen::Vector3d(1, 0, 0); // Axis
-req.task_description.goal.affordance = M_PI / 2.0; // Goal
-```
-
-5. Generating the joint trajectory to accomplish the specified task:
-```cpp
-try
-{
-plannerResult = ccAffordancePlannerInterface.generate_joint_trajectory(robot_description, task_description);
-}
-catch (const std::invalid_argument &e)
-{
-std::cerr << "Planner returned exception: " << e.what() << std::endl;
-}
-```
-
-Reading the result:
-```cpp
-if (plannerResult.success)
-{
-std::vector<Eigen::VectorXd> solution = plannerResult.joint_trajectory;// Contains the entire closed-chain trajectory. For robot trajectory that you can send to a j-joint robot, extract the first j joint positions in each point in the trajectory.
-// Additional planning result info
-switch (plannerResult.trajectory_description)
-        {
-
-        case cc_affordance_planner::TrajectoryDescription::FULL:
-            std::cout<<"Trajectory description: FULL.\n";
-            break;
-        case cc_affordance_planner::TrajectoryDescription::PARTIAL:
-            std::cout<<"Trajectory description: PARTIAL. Execute with caution.\n";
-            break;
-        default:
-            std::cout<<"Trajectory description: UNSET.\n";
-            break;
-        }
-std::cout << "The entire planning took " << plannerResult.planning_time.count() << " microseconds\n";
-}
-else
-{
-std::cerr << "Planner did not find a solution." << std::endl;
-}
-```
-
-#### Optional Features
-Below are optional and advanced features of this framework that one may choose to use as needed.
-
-##### Gripper Trajectory Consideration
-The framework can compute a joint trajectory that considers the gripper. To use this feature simply, provide the current state of the gripper in robot description and specify the desired goal state in task description. Optionally, provide gripper goal type.
-```cpp
-robot_description.gripper_state = 0.0; // Joint value of the gripper
-task_description.goal.gripper = 0.4;
-task_description.gripper_goal_type = affordance_util::GripperGoalType::CONSTANT; // Possible values are CONSTANT and CONTINUOUS. CONSTANT is default and means the gripper joint will have the desired value, for instance, 0.4 for all points in the trajectory. CONTINUOUS means it will take trajectory_density number of points to go from the current gripper state to the goal gripper state.
-```
-
-##### Optional and Advanced Settings
-It is possible to instantiate the planner interface object with some desired settings. Here is an example that reflects default values that can be modified.
-```cpp
-cc_affordance_planner::PlannerConfig plannerConfig;
-plannerConfig.accuracy = 10.0/100; // accuracy of the planner, 10% for example
-
-// Then instantiate the planner interface object
-cc_affordance_planner::CcAffordancePlannerInterface ccAffordancePlannerInterface(plannerConfig);
-```
-Optional advanced planner config parameters with default values:
-```cpp
-plannerConfig.update_method = cc_affordance_planner::UpdateMethod::INVERSE; // method used to solve closed-chain IK. Choices are INVERSE, TRANSPOSE, and BEST. BEST runs INVERSE and TRANSPOSE in parallel and returns the best result.
-plannerConfig.closure_err_threshold_ang = 1e-4; // Threshold for the closed-chain closure angular error
-plannerConfig.closure_err_threshold_lin = 1e-5; // Threshold for the closed-chain closure linear error
-plannerConfig.ik_max_itr = 200; // Limit for the number of iterations for the closed-chain IK solver
-```
-
-Optional task description parameters:
-```cpp
-task_description.goal.ee_orientation = Eigen::Vector3d(0.1, 0.0, 0.1); // EE orientation to maintain along the affordance path, rpy = [0.1,0.0,0.1] for instance. Can specify one or more aspections of the orientation in the order specified by VirScrewOrder below.
-task_description.trajectory_density = 10; // Number of points in the solved joint trajectory, 10 for example
-task_description.vir_screw_order = affordance_util::VirtualScrewOrder::XYZ; // Order of the axes in the closed-chain model virtual gripper joint. Possible values are XYZ, YZX, ZXY, and NONE.
-
-// For affordance, one can directly specify the 6x1 screw vector for affordance instead of axis and location
-aff.type = affordance_util::ScrewType::TRANSLATION;
-aff.screw = Eigen::Vector6d(0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
-```
-#### Task Examples
-##### Affordance - Rotation
-```cpp
-cc_affordance_planner::TaskDescription task_description;
-
-// Affordance
-aff.type = affordance_util::ScrewType::ROTATION;
-aff.axis = Eigen::Vector3d(0, 0, 1);
-aff.location = Eigen::Vector3d(0.0, 0.0, 0.0);
-aff_goal = (Eigen::VectorXd(1) << (1.0 / 2.0) * M_PI).finished();
-task_description.affordance_info = aff;
-
-// Goal
-task_description.goal.affordance = (1.0 / 2.0) * M_PI;
-```
-
-##### Affordance - Translation
-```cpp
-cc_affordance_planner::TaskDescription task_description;
-
-// Affordance
-aff.type = affordance_util::ScrewType::TRANSLATION;
-aff.axis = Eigen::Vector3d(1.0, 0.0, 0.0);
-aff.location = Eigen::Vector3d(0.0, 0.0, 0.0);
-task_description.affordance_info = aff;
-
-// Goal
-task_description.goal.affordance = 0.5;
-```
-
-##### Affordance - Screw
-```cpp
-cc_affordance_planner::TaskDescription task_description;
-
-// Affordance
-aff.type = affordance_util::ScrewType::SCREW;
-aff.axis = Eigen::Vector3d(0, 0, 1);
-aff.location = Eigen::Vector3d(0.0, 0.0, 0.0);
-aff.pitch = 0.5;
-task_description.affordance_info = aff;
-
-// Goal
-task_description.goal.affordance = (1.0 / 2.0) * M_PI;
-```
-
-##### Affordance - Rotation with EE Orientation Control
-```cpp
-cc_affordance_planner::TaskDescription task_description;
-
-// Affordance
-aff.type = affordance_util::ScrewType::ROTATION;
-aff.axis = Eigen::Vector3d(0, 0, 1);
-aff.location = Eigen::Vector3d(0.0, 0.0, 0.0);
-aff_goal = (Eigen::VectorXd(1) << (1.0 / 2.0) * M_PI).finished();
-task_description.affordance_info = aff;
-
-// Goal
-task_description.goal.affordance = (1.0 / 2.0) * M_PI;
-task_description.goal.ee_orientation = Eigen::Vector3d(0.1, 0.0, 0.1); # Gripper-frame orientation per vir_screw_order. Default as roll-pitch-yaw.
-```
-
-### Author
-Janak Panthi aka Crasun Jans
+Panthi, Janak, Farshid Alambeigi, and Mitch Pryor. “A Closed-Chain Approach to Generating Affordance Joint Trajectories for Robotic Manipulators.” IEEE Transactions on Robotics, 2025.

@@ -1,8 +1,6 @@
 """Enumerations exposed by the :mod:`closed_chain_affordance` package.
 
-These mirror the ``enum class`` definitions in the original C++ implementation
-(``affordance_util`` and ``cc_affordance_planner``) so that user code written
-against the compiled bindings keeps working unchanged.
+They describe axes, screw types, motion types and planner update strategies.
 """
 
 from __future__ import annotations

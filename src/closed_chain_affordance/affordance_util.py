@@ -2,7 +2,7 @@
 
 Pure-Python translation of ``affordance_util`` (minus the Modern Robotics math
 primitives, which live in :mod:`closed_chain_affordance.math_utils`, and the
-robot builders, which live in :mod:`closed_chain_affordance.robot_builder`).
+    robot builders, which live in :mod:`closed_chain_affordance.robot_builder`).
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from .math_utils import (
 from .structs import CcModel, RobotDescription, ScrewInfo, ScrewInfoFrom, PoseFrom
 
 # Mapping from a virtual screw order to the matrix whose columns are the
-# corresponding axes. This replicates ``get_vir_screw_axes`` in the C++ header.
+# corresponding axes.
 _VIR_SCREW_AXES = {
     VirtualScrewOrder.XYZ: np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
     VirtualScrewOrder.YZX: np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
@@ -48,7 +48,7 @@ def axis_to_vec(axis: Axis) -> np.ndarray:
     """Convert an :class:`Axis` enum to a unit direction vector.
 
     ``ORIGIN`` returns the zero vector; ``MANUAL`` (or an unknown value) raises
-    a ``RuntimeError`` just like the C++ implementation.
+    a ``RuntimeError`` because it has no predefined direction.
     """
     if axis in _AXIS_VECTORS:
         return _AXIS_VECTORS[axis].copy()
@@ -143,7 +143,7 @@ def compose_cc_model_slist(
     affordance screw is appended and the raw screw matrix is returned.
     """
     # Robot portion of the closed-chain model is the spatial Jacobian evaluated
-    # at the current configuration (matches the C++ implementation).
+    # at the current configuration.
     robot_jacobian = jacobian_space(robot_description.slist, robot_description.joint_states)
 
     aff = aff_info
@@ -321,6 +321,6 @@ def _has_nan(arr) -> bool:
     if arr.size == 0:
         # The default ee_orientation is an empty array, which is "set" (empty).
         # This helper is only used for axis/location/screw checks where empty
-        # should be treated as unset, matching Eigen's empty == hasNaN() == false.
+        # should be treated as unset by the field validation logic.
         return False
     return bool(np.isnan(arr).any())

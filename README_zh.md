@@ -1,16 +1,22 @@
-# 闭链可供性（CCA）纯 Python 规划器
+# 闭链可供性规划器
 
-本仓库提供原始 C++ Closed-Chain Affordance 规划器的纯 Python 复现。默认安装只使用 NumPy、SciPy 和 PyYAML，不需要编译 C++，也不依赖 Torch。
+这是 Closed-Chain Affordance（CCA）规划框架的纯 Python 实现。运动学和闭链逆运动学使用 NumPy 与 SciPy，机器人配置使用 PyYAML，URDF 由 Python 标准库解析。
 
-原始 C++ 实现仍保留在 `affordance_util/`、`cc_affordance_planner/` 和 `bindings/` 中，作为算法基准和等价测试参考。
+CCA 使用螺旋轴、轴位置和运动目标描述操作任务，可用于旋转阀门、拉动抽屉、笛卡尔接近以及末端姿态控制。
 
 ## 安装
+
+```bash
+pip install .
+```
+
+开发时可使用可编辑安装：
 
 ```bash
 pip install -e .
 ```
 
-如果需要 MeshCat 可视化：
+MeshCat 可视化是可选功能：
 
 ```bash
 pip install -e ".[viewer]"
@@ -27,7 +33,7 @@ import closed_chain_affordance as cca
 root = Path.cwd()
 robot = cca.build_robot_description_from_urdf(
     str(root / "assets/robot/x5/urdf/x5.urdf"),
-    str(root / "python/x5_urdf_config.yaml"),
+    str(root / "examples/x5_urdf_config.yaml"),
     joint_states=np.zeros(6),
 )
 
@@ -42,40 +48,37 @@ task.trajectory_density = 20
 
 config = cca.PlannerConfig()
 config.update_method = cca.UpdateMethod.INVERSE
-
 result = cca.plan(robot, task, config)
-print(result.success, result.trajectory_description)
+
+print(result.success)
+print(result.trajectory_description)
 ```
 
-`result.joint_trajectory` 的第一个点是机器人起始状态。其后的点包含机器人关节以及闭链模型内部的虚拟关节状态；控制机器人时应按机器人实际关节数量截取前部元素。
+## 示例
 
-## APPROACH 与 AFFORDANCE
-
-- `PlanningType.CARTESIAN_GOAL`：生成到笛卡尔目标位姿的 APPROACH 轨迹。
-- `MotionType.AFFORDANCE`：TCP 已接触目标后，沿旋转、平移或一般螺旋运动。
-- `PlanningType.EE_ORIENTATION_ONLY`：保持 TCP 位置并调整末端姿态。
-
-典型任务应先规划 APPROACH，再以到达状态构造新的 `RobotDescription` 并规划 AFFORDANCE。完整示例见 `python/demo_x5_urdf.py`。
+x5 示例会先规划笛卡尔 APPROACH，再规划阀门旋转：
 
 ```bash
-# 只规划
-python python/demo_x5_urdf.py
-
-# 规划并显示 MeshCat 动画
-python python/demo_x5_urdf.py --viewer
+python examples/demo_x5_urdf.py
 ```
 
-## 与 C++ 对照测试
-
-构建 C++ reference 需要 Eigen、yaml-cpp、urdfdom 和 pybind11：
+显示 MeshCat 动画：
 
 ```bash
-sudo apt install libyaml-cpp-dev liburdfdom-dev libeigen3-dev
-cmake -S . -B build -DPython3_EXECUTABLE=$(which python)
-cmake --build build -j4
-mkdir -p tests/_cpp_ref
-mv python/closed_chain_affordance.so tests/_cpp_ref/
-pytest tests/test_cpp_python_equivalence.py -q
+python examples/demo_x5_urdf.py --viewer
 ```
 
-两套实现使用不同的线性代数后端：C++ 使用 Eigen 的 Complete Orthogonal Decomposition，Python 使用 NumPy SVD。因此等价测试采用浮点容差，而不是要求逐位相同。
+`result.joint_trajectory` 的第一个点是机器人起始状态。后续点还包含闭链模型内部的虚拟关节；向具有 `n` 个关节的机器人发送命令时，应截取每个轨迹点的前 `n` 个值。
+
+## 目录结构
+
+```text
+src/closed_chain_affordance/  Python 包
+examples/                     示例和可视化工具
+assets/                       x5 URDF 与网格资源
+pyproject.toml                构建和依赖配置
+```
+
+## 论文
+
+Panthi, Janak, Farshid Alambeigi, and Mitch Pryor. “A Closed-Chain Approach to Generating Affordance Joint Trajectories for Robotic Manipulators.” IEEE Transactions on Robotics, 2025.
