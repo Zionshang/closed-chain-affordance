@@ -29,8 +29,8 @@ _VIR_SCREW_AXES = {
     VirtualScrewOrder.YZX: np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
     VirtualScrewOrder.ZXY: np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]),
     VirtualScrewOrder.XY: np.array([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]),
-    VirtualScrewOrder.YZ: np.array([[0.0, 1.0], [1.0, 0.0], [0.0, 0.0]]),
-    VirtualScrewOrder.ZX: np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 0.0]]),
+    VirtualScrewOrder.YZ: np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
+    VirtualScrewOrder.ZX: np.array([[0.0, 1.0], [0.0, 0.0], [1.0, 0.0]]),
 }
 
 _AXIS_VECTORS = {
@@ -118,6 +118,11 @@ def compute_gripper_joint_trajectory(
     ``CONSTANT`` holds ``gripper_end_state`` for the whole trajectory;
     ``CONTINUOUS`` linearly interpolates from start to end.
     """
+    trajectory_density = int(trajectory_density)
+    if trajectory_density <= 0:
+        return []
+    if trajectory_density == 1:
+        return [float(gripper_end_state)]
     if gripper_goal_type == GripperGoalType.CONSTANT:
         return [float(gripper_end_state)] * int(trajectory_density)
 
@@ -143,13 +148,13 @@ def compose_cc_model_slist(
 
     aff = aff_info
     if _has_nan(aff.screw):
-        aff = ScrewInfo(
-            type=aff.type,
-            axis=np.asarray(aff.axis, dtype=float).copy(),
-            location=np.asarray(aff.location, dtype=float).copy(),
-            screw=get_screw(aff),
-            pitch=aff.pitch,
-        )
+        resolved_aff = ScrewInfo()
+        resolved_aff.type = aff.type
+        resolved_aff.axis = np.asarray(aff.axis, dtype=float).copy()
+        resolved_aff.location = np.asarray(aff.location, dtype=float).copy()
+        resolved_aff.screw = get_screw(aff)
+        resolved_aff.pitch = aff.pitch
+        aff = resolved_aff
 
     if approach_end_pose is not None:
         return _compose_with_approach(robot_description, robot_jacobian, aff, approach_end_pose, vir_screw_order)

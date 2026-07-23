@@ -7,92 +7,92 @@ against the compiled bindings keeps working unchanged.
 
 from __future__ import annotations
 
-from enum import Enum, auto
+from enum import Enum
 
 
 class Axis(Enum):
     """Selection from common axes, or manual entry."""
 
-    X = auto()
-    Y = auto()
-    Z = auto()
-    X_MINUS = auto()
-    Y_MINUS = auto()
-    Z_MINUS = auto()
-    ORIGIN = auto()
-    MANUAL = auto()
+    X = 0
+    Y = 1
+    Z = 2
+    X_MINUS = 3
+    Y_MINUS = 4
+    Z_MINUS = 5
+    ORIGIN = 6
+    MANUAL = 7
 
 
 class PoseSpecificationMethod(Enum):
     """How a pose is provided or determined."""
 
-    PROVIDED = auto()
-    FROM_FK = auto()
-    FROM_FRAME_NAME = auto()
+    PROVIDED = 0
+    FROM_FK = 1
+    FROM_FRAME_NAME = 2
 
 
 class GripperGoalType(Enum):
     """Type of gripper goal along a joint trajectory."""
 
-    CONSTANT = auto()
-    CONTINUOUS = auto()
+    CONSTANT = 0
+    CONTINUOUS = 1
 
 
 class ScrewType(Enum):
     """The three screw types (plus an explicit unset state)."""
 
-    ROTATION = auto()
-    TRANSLATION = auto()
-    SCREW = auto()
-    UNSET = auto()
+    ROTATION = 0
+    TRANSLATION = 1
+    SCREW = 2
+    UNSET = 3
 
 
 class VirtualScrewOrder(Enum):
     """Order of axes for the virtual spherical joint of the closed-chain model."""
 
-    XYZ = auto()
-    YZX = auto()
-    ZXY = auto()
-    XY = auto()
-    YZ = auto()
-    ZX = auto()
-    NONE = auto()
+    XYZ = 0
+    YZX = 1
+    ZXY = 2
+    XY = 3
+    YZ = 4
+    ZX = 5
+    NONE = 6
 
 
 class EeOrientationConstraint(Enum):
     """Common end-effector orientation constraints."""
 
-    PRESERVE = auto()
-    DEFAULT = auto()
+    PRESERVE = 0
+    DEFAULT = 1
 
 
 class PlanningType(Enum):
     """Planning types offered by the closed-chain affordance planner."""
 
-    APPROACH = auto()
-    AFFORDANCE = auto()
-    EE_ORIENTATION_ONLY = auto()
-    CARTESIAN_GOAL = auto()
+    APPROACH = 0
+    AFFORDANCE = 1
+    EE_ORIENTATION_ONLY = 2
+    CARTESIAN_GOAL = 3
 
 
 class MotionType(Enum):
     """Motion types offered by the closed-chain affordance model."""
 
-    APPROACH = auto()
-    AFFORDANCE = auto()
+    APPROACH = 0
+    AFFORDANCE = 1
 
 
 class TrajectoryDescription(Enum):
     """Qualitative description of a planned trajectory length."""
 
-    FULL = auto()
-    PARTIAL = auto()
-    UNSET = auto()
+    FULL = 0
+    PARTIAL = 1
+    UNSET = 2
 
 
 class UpdateMethod(Enum):
     """Update methods for the closed-chain IK solver."""
 
-    INVERSE = auto()
-    TRANSPOSE = auto()
-    BEST = auto()
+    INVERSE = 0
+    TRANSPOSE = 1
+    BEST = 2

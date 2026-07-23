@@ -45,7 +45,7 @@ def _origin_to_matrix(origin_xyz, origin_rpy) -> np.ndarray:
     an extrinsic XYZ Euler sequence.
     """
     transform = np.eye(4)
-    transform[:3, :3] = Rotation.from_euler("XYZ", origin_rpy).as_matrix()
+    transform[:3, :3] = Rotation.from_euler("xyz", origin_rpy).as_matrix()
     transform[:3, 3] = origin_xyz
     return transform
 
@@ -306,7 +306,7 @@ def _robot_description_from_config(
         robot_description.joint_states = np.zeros(robot_config.slist.shape[1])
     else:
         robot_description.joint_states = np.asarray(joint_states, dtype=float).reshape(-1)
-    if gripper_state is None or (isinstance(gripper_state, float) and math.isnan(gripper_state)):
+    if isinstance(gripper_state, float) and math.isnan(gripper_state):
         robot_description.gripper_state = float("nan")
     else:
         robot_description.gripper_state = float(gripper_state)

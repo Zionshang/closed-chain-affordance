@@ -54,7 +54,8 @@ Follow these steps to install the `affordance_util` and `cc_affordance_planner` 
 
 ## Python Bindings
 
-This repository also includes a `pybind11`-based Python extension and demo scripts under `python/`.
+This repository includes a pure-Python implementation and keeps the original
+`pybind11` extension as a reference for equivalence testing.
 
 ### Python Environment
 
@@ -78,7 +79,6 @@ conda activate cca
 
 The environment currently includes:
 - `pybind11` for building the extension
-- `scikit-build-core` for `pip`-based builds
 - `meshcat-python` for visualization
 - `pinocchio` for URDF-based MeshCat visualization
 
@@ -145,12 +145,6 @@ method is compared structurally (success / description / length) since the
 winning planner is scheduling-dependent.
 
 ### Run the Python Demos
-
-Run the simple hard-coded UR5 demo:
-
-```bash
-python python/demo_simple.py
-```
 
 Run the x5 URDF demo (planning only):
 

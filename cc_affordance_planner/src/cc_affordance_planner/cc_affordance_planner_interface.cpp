@@ -4,6 +4,21 @@
 namespace cc_affordance_planner
 {
 
+namespace
+{
+constexpr double kTransformationTolerance = 1e-4;
+
+bool is_valid_htm(const Eigen::Matrix4d &transform)
+{
+    const Eigen::Matrix3d rotation = transform.block<3, 3>(0, 0);
+    const bool valid_rotation = rotation.isUnitary(kTransformationTolerance) &&
+                                std::abs(rotation.determinant() - 1.0) < kTransformationTolerance;
+    const bool valid_bottom = transform.row(3).head(3).isZero(kTransformationTolerance) &&
+                              std::abs(transform(3, 3) - 1.0) < kTransformationTolerance;
+    return valid_rotation && valid_bottom;
+}
+} // namespace
+
 CcAffordancePlannerInterface::CcAffordancePlannerInterface()
     : ccAffordancePlannerInverse_(), ccAffordancePlannerTranspose_()
 {
@@ -74,7 +89,7 @@ PlannerResult CcAffordancePlannerInterface::generate_joint_trajectory(
     // theta_sdf vector.
 
     // Extract additional task description
-    Eigen::Matrix4d canonical_pose;
+    Eigen::Matrix4d canonical_pose = task_description.goal.canonical_pose;
     if (task_description.motion_type == MotionType::APPROACH)
     {
         // Canonical pose -- handle if asked to get from FK
@@ -83,6 +98,12 @@ PlannerResult CcAffordancePlannerInterface::generate_joint_trajectory(
         }
         else {
             canonical_pose = task_description.goal.canonical_pose;
+        }
+
+        if (!is_valid_htm(canonical_pose))
+        {
+            throw std::invalid_argument("Task description: 'canonical_pose' is not a valid transformation matrix. "
+                                        "Valid canonical pose is needed for approach motion.");
         }
 
         // Compose the closed-chain model screws and determine the limit for the approach screw
@@ -343,24 +364,6 @@ void CcAffordancePlannerInterface::validate_input_(const affordance_util::RobotD
         throw std::invalid_argument("Robot description: 'M' (palm HTM) must be specified.");
     }
 
-    // Lambda to check if a matrix is a valid homogeneous transformation matrix
-    const double tolerance = 1e-4;
-    auto is_valid_htm = [tolerance](const Eigen::Matrix4d& T) -> bool {
-        const Eigen::Matrix3d R = T.block<3,3>(0,0);
-        
-        // Check if R is a proper rotation matrix
-        bool valid_rotation = 
-            R.isUnitary(tolerance) &&  // R^T * R = I
-            (std::abs(R.determinant() - 1.0) < tolerance);  // det(R) = +1
-        
-        // Check if bottom row is [0, 0, 0, 1]
-        bool valid_bottom = 
-            T.row(3).head(3).isZero(tolerance) &&
-            (std::abs(T(3,3) - 1.0) < tolerance);
-        
-        return valid_rotation && valid_bottom;
-    };
-
     if (!is_valid_htm(robot_description.M))
     {
         throw std::invalid_argument("Robot description: 'M' is not a valid transformation matrix.");
@@ -412,7 +415,7 @@ void CcAffordancePlannerInterface::validate_input_(const affordance_util::RobotD
     }
 
     if (!task_description.affordance_info.axis.hasNaN() &&
-        std::abs(task_description.affordance_info.axis.norm() - 1) > tolerance)
+        std::abs(task_description.affordance_info.axis.norm() - 1) > kTransformationTolerance)
     {
         throw std::invalid_argument("Task description: 'affordance_info.axis' must be a unit vector");
     }
@@ -421,12 +424,6 @@ void CcAffordancePlannerInterface::validate_input_(const affordance_util::RobotD
     {
 
         throw std::invalid_argument("Task description: 'goal.affordance' must be specified and cannot be NaN.");
-    }
-
-    if ((task_description.motion_type == MotionType::APPROACH) && (!is_valid_htm(task_description.goal.canonical_pose)))
-    {
-        throw std::invalid_argument("Task description: 'canonical_pose' is not a valid transformation matrix. "
-            "Valid canonical pose is needed for approach motion.");
     }
 
     if (task_description.trajectory_density < 2)

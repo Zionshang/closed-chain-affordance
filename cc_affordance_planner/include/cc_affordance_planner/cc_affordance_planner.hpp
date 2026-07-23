@@ -82,7 +82,7 @@ struct Goal
 
     double affordance = std::numeric_limits<double>::quiet_NaN();
     Eigen::VectorXd ee_orientation;
-    Eigen::Matrix4d canonical_pose;
+    Eigen::Matrix4d canonical_pose = Eigen::Matrix4d::Constant(std::numeric_limits<double>::quiet_NaN());
     double gripper = std::numeric_limits<double>::quiet_NaN();
 };
 
@@ -149,10 +149,10 @@ enum class UpdateMethod
 struct PlannerResult
 {
     bool success = false;
-    TrajectoryDescription trajectory_description;
+    TrajectoryDescription trajectory_description = TrajectoryDescription::UNSET;
     std::vector<Eigen::VectorXd> joint_trajectory;
-    std::chrono::microseconds planning_time;
-    UpdateMethod update_method;
+    std::chrono::microseconds planning_time{0};
+    UpdateMethod update_method = UpdateMethod::BEST;
     std::string update_trail = "";
     bool includes_gripper_trajectory = false;
     TaskDescription task_description;

@@ -24,10 +24,16 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _loader import CPP_SO, load_both  # noqa: E402
 from _scenarios import NONDETERMINISTIC, SCENARIOS  # noqa: E402
+
+pytestmark = pytest.mark.skipif(
+    not CPP_SO.exists(),
+    reason="C++ reference binding is not staged under tests/_cpp_ref",
+)
 
 TESTS_DIR = Path(__file__).resolve().parent
 WORKER = TESTS_DIR / "_worker.py"
@@ -45,6 +51,15 @@ WORKER = TESTS_DIR / "_worker.py"
 JOINT_ATOL = 1e-6
 JOINT_RTOL = 1e-5
 STRICT_ATOL = 1e-9
+
+CPP_PUBLIC_API = {
+    "Axis", "PoseSpecificationMethod", "GripperGoalType", "ScrewType", "VirtualScrewOrder",
+    "EeOrientationConstraint", "PlanningType", "MotionType", "TrajectoryDescription", "UpdateMethod",
+    "VecInfo", "PoseFrom", "ScrewInfoFrom", "ScrewInfo", "RobotDescription", "Goal",
+    "TaskDescription", "PlannerConfig", "PlannerResult", "CcAffordancePlannerInterface",
+    "axis_to_vec", "get_screw", "fkin_space", "plan", "build_robot_description_from_yaml",
+    "build_robot_description_from_urdf",
+}
 
 
 def _require_cpp_binding():
@@ -109,6 +124,23 @@ def _compare(cpp: dict, py: dict, scenario: str, *, nondeterministic: bool = Fal
 # --------------------------------------------------------------------------- #
 # Free-function checks (lightweight; safe to run in-process).
 # --------------------------------------------------------------------------- #
+def test_public_api_contract():
+    cca_cpp, cca_py = load_both()
+    assert set(cca_py.__all__) == CPP_PUBLIC_API
+    assert CPP_PUBLIC_API.issubset(set(dir(cca_cpp)))
+
+    enum_names = [
+        "Axis", "PoseSpecificationMethod", "GripperGoalType", "ScrewType", "VirtualScrewOrder",
+        "EeOrientationConstraint", "PlanningType", "MotionType", "TrajectoryDescription", "UpdateMethod",
+    ]
+    for enum_name in enum_names:
+        cpp_enum = getattr(cca_cpp, enum_name)
+        py_enum = getattr(cca_py, enum_name)
+        for expected_value, member_name in enumerate(py_enum.__members__):
+            assert getattr(py_enum, member_name).value == expected_value
+            assert getattr(cpp_enum, member_name).value == expected_value
+
+
 def test_axis_to_vec():
     cca_cpp, cca_py = load_both()
     for axis_name in ["X", "Y", "Z", "X_MINUS", "Y_MINUS", "Z_MINUS", "ORIGIN"]:
@@ -197,6 +229,7 @@ for _name in SCENARIOS:
 # --------------------------------------------------------------------------- #
 def _collect_tests():
     tests = [
+        ("public_api_contract", test_public_api_contract),
         ("axis_to_vec", test_axis_to_vec),
         ("get_screw", test_get_screw),
         ("fkin_space", test_fkin_space),

@@ -70,6 +70,7 @@ class CcAffordancePlanner:
         stop_event=None,
     ) -> PlannerResult:
         start_time = time.perf_counter()
+        self.dls_flag_ = False
         result = PlannerResult()
 
         theta_sdf_clamped = clamp_to_magnitude_minimum(np.asarray(theta_sdf, dtype=float), self.goal_min_)
@@ -121,6 +122,7 @@ class CcAffordancePlanner:
         stop_event=None,
     ) -> PlannerResult:
         start_time = time.perf_counter()
+        self.dls_flag_ = False
         result = PlannerResult()
 
         theta_sdf_clamped = clamp_to_magnitude_minimum(np.asarray(theta_sdf, dtype=float), self.goal_min_)

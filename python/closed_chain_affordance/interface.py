@@ -9,6 +9,7 @@ interleaving a gripper trajectory).
 
 from __future__ import annotations
 
+import copy
 import threading
 
 import numpy as np
@@ -37,6 +38,7 @@ from .structs import (
 )
 
 _VALIDATION_TOL = 1e-4
+_DEFAULT_CONFIG = object()
 
 
 def _has_nan(arr) -> bool:
@@ -63,13 +65,15 @@ def _is_valid_htm(transform: np.ndarray) -> bool:
 class CcAffordancePlannerInterface:
     """User-facing interface for closed-chain affordance planning."""
 
-    def __init__(self, planner_config: PlannerConfig | None = None):
-        if planner_config is None:
+    def __init__(self, planner_config=_DEFAULT_CONFIG):
+        if planner_config is _DEFAULT_CONFIG:
             planner_config = PlannerConfig()
+        elif not isinstance(planner_config, PlannerConfig):
+            raise TypeError("planner_config must be a PlannerConfig")
         self._validate_config(planner_config)
-        self.planner_config_ = planner_config
-        self.inverse_planner = CcAffordancePlannerInverse(planner_config)
-        self.transpose_planner = CcAffordancePlannerTranspose(planner_config)
+        self.planner_config_ = copy.deepcopy(planner_config)
+        self.inverse_planner = CcAffordancePlannerInverse(self.planner_config_)
+        self.transpose_planner = CcAffordancePlannerTranspose(self.planner_config_)
 
     @staticmethod
     def _validate_config(planner_config: PlannerConfig) -> None:
@@ -98,13 +102,12 @@ class CcAffordancePlannerInterface:
 
         # Affordance info (optionally recovered from forward kinematics).
         src = task_description.affordance_info
-        aff = ScrewInfo(
-            type=src.type,
-            axis=np.asarray(src.axis, dtype=float).copy(),
-            location=np.asarray(src.location, dtype=float).copy(),
-            screw=np.asarray(src.screw, dtype=float).copy(),
-            pitch=src.pitch,
-        )
+        aff = ScrewInfo()
+        aff.type = src.type
+        aff.axis = np.asarray(src.axis, dtype=float).copy()
+        aff.location = np.asarray(src.location, dtype=float).copy()
+        aff.screw = np.asarray(src.screw, dtype=float).copy()
+        aff.pitch = src.pitch
         if task_description.affordance_info_from.method == PoseSpecificationMethod.FROM_FK:
             vec_info = get_affordance_info_from_fk(task_description.affordance_info_from, robot_description)
             aff.location = vec_info.location
@@ -121,6 +124,11 @@ class CcAffordancePlannerInterface:
         if task_description.motion_type == MotionType.APPROACH:
             if task_description.canonical_pose_from.method == PoseSpecificationMethod.FROM_FK:
                 canonical_pose = get_pose_from_fk(task_description.canonical_pose_from, robot_description)
+            if not _is_valid_htm(canonical_pose):
+                raise ValueError(
+                    "Task description: 'canonical_pose' is not a valid transformation matrix. "
+                    "Valid canonical pose is needed for approach motion."
+                )
 
             cc_model = compose_cc_model_slist(robot_description, aff, canonical_pose, vir_screw_order)
             nof_secondary_joints += 1  # approach joint
@@ -165,9 +173,9 @@ class CcAffordancePlannerInterface:
         )
 
         # Record the (possibly FK-resolved) task description on the result.
-        planner_result.task_description = task_description
+        planner_result.task_description = copy.deepcopy(task_description)
         planner_result.task_description.affordance_info = aff
-        planner_result.task_description.goal.canonical_pose = canonical_pose
+        planner_result.task_description.goal.canonical_pose = np.asarray(canonical_pose, dtype=float).copy()
         return planner_result
 
     # ------------------------------------------------------------------ #
@@ -357,12 +365,6 @@ class CcAffordancePlannerInterface:
         if np.isnan(task_description.goal.affordance):
             raise ValueError("Task description: 'goal.affordance' must be specified and cannot be NaN.")
 
-        if task_description.motion_type == MotionType.APPROACH and not _is_valid_htm(task_description.goal.canonical_pose):
-            raise ValueError(
-                "Task description: 'canonical_pose' is not a valid transformation matrix. "
-                "Valid canonical pose is needed for approach motion."
-            )
-
         if task_description.trajectory_density < 2:
             raise ValueError("Task description: 'trajectory_density' must be >= 2.")
 
@@ -370,7 +372,7 @@ class CcAffordancePlannerInterface:
 def plan(
     robot_description: RobotDescription,
     task_description: TaskDescription,
-    planner_config: PlannerConfig | None = None,
+    planner_config=_DEFAULT_CONFIG,
 ) -> PlannerResult:
     """Convenience helper: build an interface and plan in one call."""
     planner = CcAffordancePlannerInterface(planner_config)

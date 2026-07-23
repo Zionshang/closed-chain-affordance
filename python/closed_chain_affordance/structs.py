@@ -24,6 +24,7 @@ from .enums import (
 )
 
 _TWIST_LEN = 6
+_NO_PLANNING_TYPE = object()
 
 
 def _nan_vec(n: int) -> np.ndarray:
@@ -34,52 +35,52 @@ def _nan_square(n: int) -> np.ndarray:
     return np.full((n, n), np.nan)
 
 
-@dataclass
 class VecInfo:
     """Axis and location information of a vector."""
 
-    axis: np.ndarray = field(default_factory=lambda: _nan_vec(3))
-    location: np.ndarray = field(default_factory=lambda: _nan_vec(3))
+    def __init__(self) -> None:
+        self.axis: np.ndarray = _nan_vec(3)
+        self.location: np.ndarray = _nan_vec(3)
 
 
-@dataclass
 class PoseFrom:
     """Helpers for automating pose lookup using various approaches."""
 
-    method: PoseSpecificationMethod = PoseSpecificationMethod.PROVIDED
-    frame_name: str = ""
-    post_transform: np.ndarray = field(default_factory=lambda: np.eye(4))
+    def __init__(self) -> None:
+        self.method: PoseSpecificationMethod = PoseSpecificationMethod.PROVIDED
+        self.frame_name: str = ""
+        self.post_transform: np.ndarray = np.eye(4)
 
 
-@dataclass
 class ScrewInfoFrom:
     """Helpers for automating screw-info lookup using various approaches."""
 
-    method: PoseSpecificationMethod = PoseSpecificationMethod.PROVIDED
-    frame_name: str = ""
-    post_transform: np.ndarray = field(default_factory=lambda: np.eye(4))
-    axis_in_final_pose: np.ndarray = field(default_factory=lambda: _nan_vec(3))
+    def __init__(self) -> None:
+        self.method: PoseSpecificationMethod = PoseSpecificationMethod.PROVIDED
+        self.frame_name: str = ""
+        self.post_transform: np.ndarray = np.eye(4)
+        self.axis_in_final_pose: np.ndarray = _nan_vec(3)
 
 
-@dataclass
 class ScrewInfo:
     """Information describing a screw."""
 
-    type: ScrewType = ScrewType.UNSET
-    axis: np.ndarray = field(default_factory=lambda: _nan_vec(3))
-    location: np.ndarray = field(default_factory=lambda: _nan_vec(3))
-    screw: np.ndarray = field(default_factory=lambda: _nan_vec(_TWIST_LEN))
-    pitch: float = float("nan")
+    def __init__(self) -> None:
+        self.type: ScrewType = ScrewType.UNSET
+        self.axis: np.ndarray = _nan_vec(3)
+        self.location: np.ndarray = _nan_vec(3)
+        self.screw: np.ndarray = _nan_vec(_TWIST_LEN)
+        self.pitch: float = float("nan")
 
 
-@dataclass
 class RobotDescription:
     """Description of a robot: screws, EE home transform, joint and gripper state."""
 
-    slist: np.ndarray = field(default_factory=lambda: np.zeros((6, 0)))
-    M: np.ndarray = field(default_factory=lambda: _nan_square(4))
-    joint_states: np.ndarray = field(default_factory=lambda: np.zeros(0))
-    gripper_state: float = float("nan")
+    def __init__(self) -> None:
+        self.slist: np.ndarray = np.zeros((0, 0))
+        self.M: np.ndarray = _nan_square(4)
+        self.joint_states: np.ndarray = np.zeros(0)
+        self.gripper_state: float = float("nan")
 
 
 @dataclass
@@ -113,14 +114,14 @@ class RobotConfig:
     end_joint_name: str = ""
 
 
-@dataclass
 class Goal:
     """Goals in terms of affordance, EE orientation, canonical pose and gripper."""
 
-    affordance: float = float("nan")
-    ee_orientation: np.ndarray = field(default_factory=lambda: np.zeros(0))
-    canonical_pose: np.ndarray = field(default_factory=lambda: _nan_square(4))
-    gripper: float = float("nan")
+    def __init__(self) -> None:
+        self.affordance: float = float("nan")
+        self.ee_orientation: np.ndarray = np.zeros(0)
+        self.canonical_pose: np.ndarray = _nan_square(4)
+        self.gripper: float = float("nan")
 
 
 class TaskDescription:
@@ -132,7 +133,7 @@ class TaskDescription:
     motions respectively).
     """
 
-    def __init__(self, planning_type=None) -> None:
+    def __init__(self, planning_type=_NO_PLANNING_TYPE) -> None:
         from .enums import PlanningType  # local import to avoid cycle at module load
 
         # Defaults (match the C++ struct default member initializers).
@@ -146,8 +147,10 @@ class TaskDescription:
         self.affordance_info_from: ScrewInfoFrom = ScrewInfoFrom()
         self.canonical_pose_from: PoseFrom = PoseFrom()
 
-        if planning_type is None:
+        if planning_type is _NO_PLANNING_TYPE:
             return
+        if not isinstance(planning_type, PlanningType):
+            raise TypeError("planning_type must be a PlanningType value")
 
         if planning_type == PlanningType.EE_ORIENTATION_ONLY:
             # A special case of AFFORDANCE: rotate the EE about an axis through
@@ -173,15 +176,15 @@ class TaskDescription:
             self.vir_screw_order = VirtualScrewOrder.NONE
 
 
-@dataclass
 class PlannerConfig:
     """Configuration settings for the closed-chain affordance planner."""
 
-    accuracy: float = 10.0 / 100.0
-    closure_err_threshold_ang: float = 1e-4
-    closure_err_threshold_lin: float = 1e-5
-    ik_max_itr: int = 200
-    update_method: UpdateMethod = UpdateMethod.BEST
+    def __init__(self) -> None:
+        self.accuracy: float = 10.0 / 100.0
+        self.closure_err_threshold_ang: float = 1e-4
+        self.closure_err_threshold_lin: float = 1e-5
+        self.ik_max_itr: int = 200
+        self.update_method: UpdateMethod = UpdateMethod.BEST
 
 
 class PlannerResult:

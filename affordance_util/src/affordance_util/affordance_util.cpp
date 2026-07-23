@@ -42,6 +42,14 @@ std::vector<double> compute_gripper_joint_trajectory(const GripperGoalType &grip
                                                      const double &gripper_start_state, const double &gripper_end_state,
                                                      const int &trajectory_density)
 {
+    if (trajectory_density <= 0)
+    {
+        return {};
+    }
+    if (trajectory_density == 1)
+    {
+        return {gripper_end_state};
+    }
     std::vector<double> trajectory(trajectory_density); // Preallocate vector with the correct size
 
     if (gripper_goal_type == GripperGoalType::CONSTANT)

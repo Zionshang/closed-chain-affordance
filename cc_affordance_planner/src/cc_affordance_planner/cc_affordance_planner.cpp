@@ -99,6 +99,7 @@ PlannerResult CcAffordancePlanner::generate_approach_motion_joint_trajectory(con
 {
 
     auto start_time = std::chrono::high_resolution_clock::now(); // Monitor clock to track planning time
+    dls_flag_ = false;
 
     PlannerResult plannerResult; // Result of the planner
 
@@ -200,6 +201,7 @@ PlannerResult CcAffordancePlanner::generate_approach_motion_joint_trajectory(con
 {
 
     auto start_time = std::chrono::high_resolution_clock::now(); // Monitor clock to track planning time
+    dls_flag_ = false;
 
     PlannerResult plannerResult; // Result of the planner
 
@@ -303,6 +305,7 @@ PlannerResult CcAffordancePlanner::generate_affordance_motion_joint_trajectory(c
 {
 
     auto start_time = std::chrono::high_resolution_clock::now(); // Monitor clock to track planning time
+    dls_flag_ = false;
 
     PlannerResult plannerResult; // Result of the planner
 
@@ -400,6 +403,7 @@ PlannerResult CcAffordancePlanner::generate_affordance_motion_joint_trajectory(c
 {
 
     auto start_time = std::chrono::high_resolution_clock::now(); // Monitor clock to track planning time
+    dls_flag_ = false;
 
     PlannerResult plannerResult; // Result of the planner
 

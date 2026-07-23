@@ -15,17 +15,7 @@ standard library only.
 
 from __future__ import annotations
 
-from .affordance_util import (
-    axis_to_vec,
-    compose_cc_model_slist,
-    compute_gripper_joint_trajectory,
-    compute_se3_screw_trajectory,
-    get_axis_from_screw,
-    get_screw,
-    get_screw_from_axis_location,
-    get_se3_screw_tasks,
-    get_vir_screw_axes,
-)
+from .affordance_util import axis_to_vec, get_screw
 from .enums import (
     Axis,
     EeOrientationConstraint,
@@ -39,67 +29,20 @@ from .enums import (
     VirtualScrewOrder,
 )
 from .interface import CcAffordancePlannerInterface, plan
-from .math_utils import (
-    adjoint,
-    axis_ang3,
-    clamp_to_magnitude_minimum,
-    fkin_space,
-    jacobian_space,
-    matrix_exp3,
-    matrix_exp6,
-    matrix_log3,
-    matrix_log6,
-    near_zero,
-    se3_to_vec,
-    so3_to_vec,
-    trans_inv,
-    vec_to_se3,
-    vec_to_so3,
-)
-from .planner import (
-    CcAffordancePlanner,
-    CcAffordancePlannerInverse,
-    CcAffordancePlannerTranspose,
-)
+from .math_utils import fkin_space
 
-# Batched PyTorch planner (optional; requires torch). Imported lazily so the core
-# package keeps working without torch installed.
-try:
-    from .batched_planner import (
-        BatchedCcAffordancePlanner,
-        BatchedCcAffordancePlannerInterface,
-        BatchedMotionResult,
-        BatchedPlannerResult,
-        compose_cc_model_slist as compose_cc_model_slist_batched,
-        plan_batch,
-    )
-    _HAS_TORCH = True
-except ImportError:  # pragma: no cover - torch is an optional dependency
-    _HAS_TORCH = False
-
-from .robot_builder import (
-    build_robot_description_from_urdf,
-    build_robot_description_from_yaml,
-    extract_info_for_urdf_robot_builder,
-    robot_builder_from_urdf,
-    robot_builder_from_yaml,
-)
+from .robot_builder import build_robot_description_from_urdf, build_robot_description_from_yaml
 from .structs import (
-    CcModel,
     Goal,
-    JointData,
     PlannerConfig,
     PlannerResult,
     PoseFrom,
-    RobotConfig,
     RobotDescription,
     ScrewInfo,
     ScrewInfoFrom,
     TaskDescription,
     VecInfo,
 )
-
-__version__ = "0.1.0"
 
 __all__ = [
     # enums
@@ -123,13 +66,7 @@ __all__ = [
     "TaskDescription",
     "PlannerConfig",
     "PlannerResult",
-    "CcModel",
-    "JointData",
-    "RobotConfig",
     # planner
-    "CcAffordancePlanner",
-    "CcAffordancePlannerTranspose",
-    "CcAffordancePlannerInverse",
     "CcAffordancePlannerInterface",
     "plan",
     # free functions (binding parity)
@@ -138,40 +75,4 @@ __all__ = [
     "fkin_space",
     "build_robot_description_from_yaml",
     "build_robot_description_from_urdf",
-    # extra helpers (pure-python surface)
-    "get_axis_from_screw",
-    "get_screw_from_axis_location",
-    "get_vir_screw_axes",
-    "compute_gripper_joint_trajectory",
-    "compute_se3_screw_trajectory",
-    "get_se3_screw_tasks",
-    "compose_cc_model_slist",
-    "extract_info_for_urdf_robot_builder",
-    "robot_builder_from_yaml",
-    "robot_builder_from_urdf",
-    "adjoint",
-    "axis_ang3",
-    "clamp_to_magnitude_minimum",
-    "jacobian_space",
-    "matrix_exp3",
-    "matrix_exp6",
-    "matrix_log3",
-    "matrix_log6",
-    "near_zero",
-    "se3_to_vec",
-    "so3_to_vec",
-    "trans_inv",
-    "vec_to_se3",
-    "vec_to_so3",
-    "__version__",
 ]
-
-if _HAS_TORCH:  # extend the public surface only when torch is available
-    __all__ += [
-        "BatchedCcAffordancePlanner",
-        "BatchedCcAffordancePlannerInterface",
-        "BatchedMotionResult",
-        "BatchedPlannerResult",
-        "compose_cc_model_slist_batched",
-        "plan_batch",
-    ]

@@ -1,10 +1,10 @@
 from __future__ import annotations
+import argparse
 from pathlib import Path
 
 import numpy as np
 
 import closed_chain_affordance as cca
-from meshcat_viewer import MeshcatViewer
 
 
 VALVE_RADIUS_M = 0.08
@@ -122,6 +122,8 @@ def main(show_viewer: bool = False) -> None:
     if not show_viewer:
         return
 
+    from meshcat_viewer import MeshcatViewer
+
     repo_root = Path(__file__).resolve().parents[1]
     urdf_path = repo_root / "assets" / "robot" / "x5" / "urdf" / "x5.urdf"
     x5_package_root = repo_root / "assets" / "robot" / "x5"
@@ -143,4 +145,7 @@ def main(show_viewer: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    main(show_viewer=True)
+    parser = argparse.ArgumentParser(description="Plan an x5 valve trajectory with the pure-Python CCA planner.")
+    parser.add_argument("--viewer", action="store_true", help="open MeshCat and animate the planned trajectory")
+    args = parser.parse_args()
+    main(show_viewer=args.viewer)

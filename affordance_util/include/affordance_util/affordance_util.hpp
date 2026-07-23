@@ -158,7 +158,7 @@ struct RobotDescription
 struct CcModel
 {
     Eigen::MatrixXd slist; // List of closed-chain screws
-    double approach_limit; // Limit of the approach screw
+    double approach_limit = std::numeric_limits<double>::quiet_NaN(); // Limit of the approach screw
 };
 
 /**
@@ -230,8 +230,8 @@ inline const Eigen::MatrixXd &get_vir_screw_axes(VirtualScrewOrder order)
         {VirtualScrewOrder::YZX, (Eigen::MatrixXd(3, 3) << 0, 0, 1, 1, 0, 0, 0, 1, 0).finished()},
         {VirtualScrewOrder::ZXY, (Eigen::MatrixXd(3, 3) << 0, 1, 0, 0, 0, 1, 1, 0, 0).finished()},
         {VirtualScrewOrder::XY, (Eigen::MatrixXd(3, 2) << 1, 0, 0, 1, 0, 0).finished()},
-        {VirtualScrewOrder::YZ, (Eigen::MatrixXd(3, 2) << 0, 1, 1, 0, 0, 0).finished()},
-        {VirtualScrewOrder::ZX, (Eigen::MatrixXd(3, 2) << 0, 0, 1, 0, 1, 0).finished()}};
+        {VirtualScrewOrder::YZ, (Eigen::MatrixXd(3, 2) << 0, 0, 1, 0, 0, 1).finished()},
+        {VirtualScrewOrder::ZX, (Eigen::MatrixXd(3, 2) << 0, 1, 0, 0, 1, 0).finished()}};
 
     return vir_screw_order_map.at(order);
 }

@@ -12,16 +12,13 @@ requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.23",
     "scipy>=1.10",
-    "pyyaml>=6.0",
-    "torch==2.10.0",
-    "torchvision==0.25.0"
+    "pyyaml>=6.0"
 ]
 
 [project.optional-dependencies]
 viewer = [
-    "viser",
-    "yourdfpy",
-    "trimesh",
+    "meshcat",
+    "pin",
 ]
 dev = [
     "pytest>=7",

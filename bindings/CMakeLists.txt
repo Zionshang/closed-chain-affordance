@@ -44,6 +44,7 @@ install(TARGETS closed_chain_affordance
     RUNTIME DESTINATION .
 )
 
-install(FILES "${CMAKE_SOURCE_DIR}/python/closed_chain_affordance.pyi"
+install(FILES "${CMAKE_SOURCE_DIR}/python/closed_chain_affordance/__init__.pyi"
     DESTINATION .
+    RENAME closed_chain_affordance.pyi
 )
