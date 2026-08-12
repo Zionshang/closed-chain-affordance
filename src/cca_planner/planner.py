@@ -58,9 +58,8 @@ _VIR_SCREW_AXES = {
     VirtualScrewOrder.YZX: ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
     VirtualScrewOrder.ZXY: ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
     VirtualScrewOrder.XY: ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
-    # Established CCA column ordering.
-    VirtualScrewOrder.YZ: ((0.0, 1.0, 0.0), (1.0, 0.0, 0.0)),
-    VirtualScrewOrder.ZX: ((0.0, 1.0, 1.0), (0.0, 0.0, 0.0)),
+    VirtualScrewOrder.YZ: ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+    VirtualScrewOrder.ZX: ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
 }
 
 

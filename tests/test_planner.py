@@ -56,8 +56,8 @@ class PlannerTests(unittest.TestCase):
             cca.VirtualScrewOrder.YZX: ((0, 1, 0), (0, 0, 1), (1, 0, 0)),
             cca.VirtualScrewOrder.ZXY: ((0, 0, 1), (1, 0, 0), (0, 1, 0)),
             cca.VirtualScrewOrder.XY: ((1, 0, 0), (0, 1, 0)),
-            cca.VirtualScrewOrder.YZ: ((0, 1, 0), (1, 0, 0)),
-            cca.VirtualScrewOrder.ZX: ((0, 1, 1), (0, 0, 0)),
+            cca.VirtualScrewOrder.YZ: ((0, 1, 0), (0, 0, 1)),
+            cca.VirtualScrewOrder.ZX: ((0, 0, 1), (1, 0, 0)),
         }
         location = torch.zeros(2, 3, dtype=torch.float64)
         for order, columns in expected.items():
