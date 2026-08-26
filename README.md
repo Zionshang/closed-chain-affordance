@@ -38,7 +38,6 @@ batch_size = 64
 robot = cca.load_robot_from_urdf(
     Path("assets/robot/x5/urdf/x5.urdf"),
     Path("examples/x5_urdf_config.yaml"),
-    dtype=dtype,
     device=device,
 )
 slist = robot.slist                         # [6, n], robot joint screw axes
@@ -55,15 +54,13 @@ turn_angles = torch.linspace(0.6, 1.2, batch_size, device=device, dtype=dtype)
 
 planner = cca.PlannerInterface(
     cca.PlannerConfig(ik_max_itr=50),
-    fast_mode=True,              # fixed-iteration masked Torch loop
-    compile=False,               # opt in only after benchmarking the target workload
-    fast_linear_solver=True,     # regularized normal-equation solver
+    early_stopping=False,                    # avoid a host sync on every IK iteration
+    use_regularized_normal_equations=True,   # replace two SVD pseudoinverse products
 )
 result = planner.generate_joint_trajectory(
     robot_slist=slist,            # shared [6, n] or batched [B, 6, n]
     robot_m=home_pose,            # shared [4, 4] or batched [B, 4, 4]
     joint_states=q0,              # initial arm state, [B, n]
-    motion_type=cca.MotionType.AFFORDANCE,
     affordance_screw=valve_screws,# valve rotation screw for every environment
     goal_affordance=turn_angles,  # different requested turn angle per environment
     trajectory_density=12,        # output points including the initial state
@@ -77,13 +74,13 @@ valid_steps = result.valid_mask       # [B, 11]
 
 `PlannerConfig` controls convergence: `accuracy`,
 `secondary_goal_min_magnitude`, `secondary_goal_abs_tolerance`,
-`closure_err_threshold_ang`, `closure_err_threshold_lin`, `ik_max_itr`, and
-`update_method`. Exact zero secondary goals remain zero; the independent
+`closure_err_threshold_ang`, `closure_err_threshold_lin`, and `ik_max_itr`.
+Exact zero secondary goals remain zero; the independent
 absolute tolerance prevents small goals from demanding unrealistic relative
-precision. By default the package uses fixed iterations
-(`fast_mode=True`, no early stop), the fast linear solver, and no
-`torch.compile`. Call `enable_chunked_early_stop()` if host-side convergence
-checks are desirable.
+precision. CCA always uses the inverse update and automatically switches to a
+damped least-squares update near singularities. The interface exposes only two
+execution choices: `early_stopping` and `use_regularized_normal_equations`.
+Planner tensors must use `torch.float32`.
 
 `PlannerInterface.solve_pose_ik()` provides batched damped-least-squares
 endpoint IK and returns `(joint_states, converged)`. It can resolve a Cartesian
@@ -104,5 +101,12 @@ python examples/demo_valve.py
 python examples/demo_drawer.py
 ```
 
-Install the development extra with `pip install -e ".[dev]"`, then run
-`pytest`.
+Install the development extra with `pip install -e ".[dev]"`, then run the two
+4096-environment timing comparisons with:
+
+```bash
+pytest -s
+```
+
+Set `CCA_BENCHMARK_ENVIRONMENTS` or `CCA_BENCHMARK_REPEATS` to use a smaller
+batch or fewer timed repetitions during quick local checks.

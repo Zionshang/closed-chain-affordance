@@ -45,10 +45,6 @@ VALVE_UP = (0.0, 0.0, 1.0)  # 初始抓取点的径向方向
 GRASP_ROLL = -torch.pi / 2  # +pi 转动从局部 x 轴 -90° 起步，避免腕部关节超过限位
 TURN_ANGLE = torch.pi  # 阀门目标转角
 
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--visualize", action="store_true", help="Open the Viser viewer.")
@@ -77,21 +73,18 @@ def main() -> None:
         URDF,
         ROBOT_CONFIG,
         joint_states=(0, 0, 0, 0, 0, 0),
-        dtype=DTYPE,
         device=DEVICE,
     )
     planner = cca.PlannerInterface(
         cca.PlannerConfig(
             accuracy=0.02,
             ik_max_itr=150,
-            update_method=cca.UpdateMethod.INVERSE,
             secondary_goal_abs_tolerance=1e-4,
             closure_err_threshold_ang=5e-4,
             closure_err_threshold_lin=5e-4,
         ),
-        fast_mode=False,
-        compile=False,
-        fast_linear_solver=True,
+        early_stopping=True,
+        use_regularized_normal_equations=True,
     )
 
     random = torch.Generator(device=DEVICE).manual_seed(SEED)
@@ -164,7 +157,6 @@ def main() -> None:
         robot_slist=robot.slist,
         robot_m=robot.M,
         joint_states=turn_start_joints,
-        motion_type=cca.MotionType.AFFORDANCE,
         affordance_screw=valve_screws,
         goal_affordance=turn_angles,
         trajectory_density=TRAJECTORY_POINTS,

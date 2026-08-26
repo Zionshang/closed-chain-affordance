@@ -36,7 +36,6 @@ def _origin_matrix(
     xyz: tuple[float, float, float],
     rpy: tuple[float, float, float],
     *,
-    dtype: torch.dtype,
     device: torch.device,
 ) -> torch.Tensor:
     """URDF fixed-axis RPY transform: ``Rz(yaw) @ Ry(pitch) @ Rx(roll)``."""
@@ -50,17 +49,17 @@ def _origin_matrix(
             [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
             [-sp, cp * sr, cp * cr],
         ],
-        dtype=dtype,
+        dtype=torch.float32,
         device=device,
     )
-    transform = torch.eye(4, dtype=dtype, device=device)
+    transform = torch.eye(4, dtype=torch.float32, device=device)
     transform[:3, :3] = rotation
-    transform[:3, 3] = torch.tensor(xyz, dtype=dtype, device=device)
+    transform[:3, 3] = torch.tensor(xyz, dtype=torch.float32, device=device)
     return transform
 
 
 class _UrdfModel:
-    def __init__(self, text: str, *, dtype: torch.dtype, device: torch.device):
+    def __init__(self, text: str, *, device: torch.device):
         root = ET.fromstring(text)
         self.joints: dict[str, dict] = {}
         self.link_parent_joint: dict[str, str] = {}
@@ -92,15 +91,15 @@ class _UrdfModel:
                 "type": element.attrib.get("type", "fixed"),
                 "parent": parent_link,
                 "child": child_link,
-                "origin": _origin_matrix(xyz, rpy, dtype=dtype, device=device),
-                "axis": torch.tensor(axis, dtype=dtype, device=device),
+                "origin": _origin_matrix(xyz, rpy, device=device),
+                "axis": torch.tensor(axis, dtype=torch.float32, device=device),
             }
             self.links.update((parent_link, child_link))
             self.link_parent_joint[child_link] = name
 
         child_links = {joint["child"] for joint in self.joints.values()}
         self.root_link = next((link for link in self.links if link not in child_links), None)
-        self.dtype = dtype
+        self.dtype = torch.float32
         self.device = device
 
     def transform_to_link(self, link: str, reference: str) -> torch.Tensor:
@@ -139,7 +138,6 @@ def load_robot_from_urdf(
     config_path: str | Path,
     *,
     joint_states=None,
-    dtype: torch.dtype = torch.float32,
     device: torch.device | str | None = None,
 ) -> RobotDescription:
     """Load a configured serial chain and return tensors ready for the planner."""
@@ -155,7 +153,7 @@ def load_robot_from_urdf(
     end_joint = chain_config["end_joint_name"]
     ee_link = config["end_effector"][0]["frame_name"]
 
-    model = _UrdfModel(Path(urdf_path).read_text(encoding="utf-8"), dtype=dtype, device=device)
+    model = _UrdfModel(Path(urdf_path).read_text(encoding="utf-8"), device=device)
     if reference not in model.links or ee_link not in model.links:
         raise ValueError("configured reference or end-effector link is missing from the URDF")
 
@@ -170,7 +168,7 @@ def load_robot_from_urdf(
         pose = model.transform_to_link(joint["parent"], reference) @ joint["origin"]
         axis = pose[:3, :3] @ joint["axis"]
         if joint["type"] == "prismatic":
-            screw = torch.cat([torch.zeros(3, dtype=dtype, device=device), axis])
+            screw = torch.cat([torch.zeros(3, dtype=torch.float32, device=device), axis])
         else:
             screw = torch.cat([axis, torch.linalg.cross(pose[:3, 3], axis)])
         screws.append(screw)
@@ -180,9 +178,9 @@ def load_robot_from_urdf(
         raise ValueError("configured chain contains no movable joints")
     slist = torch.stack(screws, dim=-1)
     if joint_states is None:
-        q = torch.zeros(len(screws), dtype=dtype, device=device)
+        q = torch.zeros(len(screws), dtype=torch.float32, device=device)
     else:
-        q = torch.as_tensor(joint_states, dtype=dtype, device=device).reshape(-1)
+        q = torch.as_tensor(joint_states, dtype=torch.float32, device=device).reshape(-1)
         if q.numel() != len(screws):
             raise ValueError(f"joint_states has {q.numel()} entries; expected {len(screws)}")
     return RobotDescription(

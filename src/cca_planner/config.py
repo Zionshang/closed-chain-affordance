@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .enums import UpdateMethod
-
-
 @dataclass
 class PlannerConfig:
     """Numerical convergence and iteration settings.
@@ -24,6 +21,5 @@ class PlannerConfig:
     closure_err_threshold_ang: float = 1e-4
     closure_err_threshold_lin: float = 1e-5
     ik_max_itr: int = 200
-    update_method: UpdateMethod = UpdateMethod.BEST
     secondary_goal_min_magnitude: float = 1e-5
     secondary_goal_abs_tolerance: float = 1e-5

@@ -40,7 +40,6 @@ B = 64  # 并行环境数；以下每个环境都可以有不同的阀门和目�
 robot = cca.load_robot_from_urdf(
     Path("assets/robot/x5/urdf/x5.urdf"),
     Path("examples/x5_urdf_config.yaml"),
-    dtype=dtype,
     device=device,
 )
 
@@ -66,7 +65,7 @@ axis = torch.tensor([1., 0., 0.], device=device, dtype=dtype).expand(B, -1)
 radii = torch.linspace(0.05, 0.085, B, device=device, dtype=dtype)
 
 # centres：阀门中心，形状 [B, 3]。假定 TCP 当前位于阀门上沿，因此阀门中心
-# 等于 TCP 沿 -z 方向移动一个半径。若阀门离末端较远，应先规划 APPROACH。
+# 等于 TCP 沿 -z 方向移动一个半径。若阀门离末端较远，应先用位姿 IK 求抓取状态。
 grasp_direction = torch.tensor([0., 0., 1.], device=device, dtype=dtype)
 centres = tcp - radii[:, None] * grasp_direction
 
@@ -81,16 +80,14 @@ turn_angles = torch.linspace(0.6, 1.2, B, device=device, dtype=dtype)
 config = cca.PlannerConfig(ik_max_itr=50)
 planner = cca.PlannerInterface(
     config,
-    fast_mode=True,           # 固定迭代次数、用 mask 冻结已收敛环境；默认开启
-    compile=False,            # 是否 torch.compile；默认关闭，需按实际批规模测试收益
-    fast_linear_solver=True,  # 用正则化法方程代替两处 SVD；默认开启
+    early_stopping=False,                   # 默认固定迭代，避免每轮同步到主机
+    use_regularized_normal_equations=True,  # 用正则化法方程代替两处 SVD
 )
 
 result = planner.generate_joint_trajectory(
     robot_slist=slist,             # [6, n] 可由所有环境共享，也可传 [B, 6, n]
     robot_m=home_pose,             # 零位 TCP 位姿：[4, 4] 或 [B, 4, 4]
     joint_states=q0,               # 每个环境的初始关节角：[B, n]
-    motion_type=cca.MotionType.AFFORDANCE,
     affordance_screw=valve_screws, # 每个阀门的 6 维运动螺旋轴：[B, 6]
     goal_affordance=turn_angles,   # 每个阀门的目标转角：[B]
     trajectory_density=12,         # 输出点数，包含初始状态，因此内部求解 11 个目标点
@@ -112,20 +109,16 @@ valid_steps = result.valid_mask       # [B, 11]，逐目标点的收敛状态
 - `closure_err_threshold_ang=1e-4`：闭链旋转残差阈值。
 - `closure_err_threshold_lin=1e-5`：闭链平移残差阈值，单位为米。
 - `ik_max_itr=200`：每个轨迹点的最大 IK 迭代次数。
-- `update_method=UpdateMethod.BEST`：比较逆法和转置法并逐环境选较优结果。
 
-下面三个构造参数是 Torch 批执行特有的实现策略，不改变 APPROACH 与
-AFFORDANCE 的统一任务描述：
+CCA 始终使用 inverse 更新，并在接近奇异时根据条件数自动切换到阻尼最小二乘。
+接口只保留两个 Torch 执行选项：
 
-- `fast_mode=True`：默认开启固定次数迭代，并用布尔 mask 冻结已收敛环境；因此默认
-  **不 early stop**，可避免 GPU 每轮同步到 CPU。
-- `fast_linear_solver=True`：默认使用正则化法方程，减少小矩阵 SVD 的高额调度开销。
-- `compile=False`：默认不调用 `torch.compile`。在 Isaac Lab 中，只有批大小、自由度和
-  轨迹密度较稳定且规划器长期复用时，编译成本才更可能被摊薄。
+- `early_stopping=False`：默认固定迭代次数，并用布尔 mask 冻结已收敛环境；设为 `True`
+  后在整个批次收敛时提前结束，但 GPU 每轮都需要同步到主机检查。
+- `use_regularized_normal_equations=True`：默认用正则化法方程代替两处 SVD 伪逆乘积。
 
-若确实希望提前终止，可在首次规划前调用
-`planner.enable_chunked_early_stop(check_interval=4)`。失败时返回张量中仍保留每个目标点
-的最后候选解，是否真正收敛必须以 `valid_mask` / `full_success` 为准。
+规划器输入统一要求使用 `torch.float32`。失败时返回张量仍保留每个目标点的最后候选解，
+是否真正收敛必须以 `valid_mask` / `full_success` 为准。
 
 `PlannerInterface.solve_pose_ik()` 提供批量阻尼最小二乘末端位姿 IK，返回
 `(joint_states, converged)`，可独立于轨迹规划结果求解 canonical pose 对应的关节状态。
@@ -145,4 +138,11 @@ python examples/demo_valve.py
 python examples/demo_drawer.py
 ```
 
-先执行 `pip install -e ".[dev]"` 安装测试依赖，再运行 `pytest`。
+先执行 `pip install -e ".[dev]"` 安装测试依赖，再运行两个默认 4096 环境的性能对比：
+
+```bash
+pytest -s
+```
+
+快速本地检查时，可以通过 `CCA_BENCHMARK_ENVIRONMENTS` 和
+`CCA_BENCHMARK_REPEATS` 减少环境数与计时重复次数。

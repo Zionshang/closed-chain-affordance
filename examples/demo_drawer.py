@@ -23,12 +23,11 @@ PULL_AXIS = (-1.0, 0.0, 0.0)  # Cabinet is in +x; pull toward the robot.
 def main():
     robot = cca.load_robot_from_urdf(
         URDF, ROBOT_CONFIG, joint_states=(0, 0, 0, 0, 0, 0),
-        dtype=DTYPE, device=DEVICE,
+        device=DEVICE,
     )
     planner = cca.PlannerInterface(
         cca.PlannerConfig(
             ik_max_itr=IK_ITERATIONS,
-            update_method=cca.UpdateMethod.INVERSE,
             closure_err_threshold_ang=1e-3,
             closure_err_threshold_lin=1e-2,
         )
@@ -66,7 +65,6 @@ def main():
         robot_slist=robot.slist,
         robot_m=robot.M,
         joint_states=grasp_joints,
-        motion_type=cca.MotionType.AFFORDANCE,
         affordance_screw=cca.get_screw(
             cca.ScrewType.TRANSLATION, pull_axes, handle_positions
         ),

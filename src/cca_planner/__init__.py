@@ -4,11 +4,8 @@ from __future__ import annotations
 
 from .config import PlannerConfig
 from .enums import (
-    GripperGoalType,
-    MotionType,
     ScrewType,
     TrajectoryDescription,
-    UpdateMethod,
     VirtualScrewOrder,
 )
 from .math import (
@@ -33,7 +30,6 @@ from .planner import (
     PlannerResult,
     build_virtual_slist,
     compose_cc_model_slist,
-    compute_gripper_joint_trajectory,
     convert_cc_traj_to_robot_traj,
     get_screw,
     get_screw_from_axis_location,
@@ -49,11 +45,8 @@ __version__ = "0.2.0"
 
 __all__ = [
     "PlannerConfig",
-    "GripperGoalType",
-    "MotionType",
     "ScrewType",
     "TrajectoryDescription",
-    "UpdateMethod",
     "VirtualScrewOrder",
     "RobotDescription",
     "Planner",
@@ -77,7 +70,6 @@ __all__ = [
     "get_screw_from_axis_location",
     "build_virtual_slist",
     "compose_cc_model_slist",
-    "compute_gripper_joint_trajectory",
     "convert_cc_traj_to_robot_traj",
     "load_robot_from_urdf",
     "build_robot_description_from_urdf",
