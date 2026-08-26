@@ -22,8 +22,9 @@ import cca_planner as cca
 
 
 ROOT = Path(__file__).resolve().parents[1]
-URDF = ROOT / "assets/robot/x5/urdf/x5.urdf"
-ROBOT_CONFIG = ROOT / "examples/x5_urdf_config.yaml"
+PIPER_ROOT = ROOT / "assets/robot/piper_l"
+URDF = PIPER_ROOT / "urdf/piper_l_fixed_gripper.urdf"
+ROBOT_CONFIG = PIPER_ROOT / "urdf/cca_config.yaml"
 NUM_ENVIRONMENTS = int(os.getenv("CCA_BENCHMARK_ENVIRONMENTS", "4096"))
 REPEATS = int(os.getenv("CCA_BENCHMARK_REPEATS", "3"))
 DEVICE = torch.device(

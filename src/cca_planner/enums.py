@@ -16,6 +16,9 @@ class ScrewType(Enum):
 class VirtualScrewOrder(Enum):
     """Axes used by the virtual spherical joint at the end effector."""
 
+    X = auto()
+    Y = auto()
+    Z = auto()
     XYZ = auto()
     YZX = auto()
     ZXY = auto()

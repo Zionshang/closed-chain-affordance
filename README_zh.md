@@ -12,7 +12,7 @@
 pip install -e .
 ```
 
-如需运行带 Viser 可视化的阀门 Demo：
+如需运行带 Viser 可视化的 cabinet Demo：
 
 ```bash
 pip install -e ".[viewer]"
@@ -24,78 +24,73 @@ pip install -e ".[viewer]"
 import cca_planner as cca
 ```
 
-## 最小示例：批量旋转阀门
+## 最小示例：批量打开 cabinet door
 
 ```python
 from pathlib import Path
+import math
 
 import torch
 import cca_planner as cca
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-dtype = torch.float32
-B = 64  # 并行环境数；以下每个环境都可以有不同的阀门和目标
+B = 64
 
 # 从 URDF 构造规划器所需的机器人运动学描述。
 robot = cca.load_robot_from_urdf(
-    Path("assets/robot/x5/urdf/x5.urdf"),
-    Path("examples/x5_urdf_config.yaml"),
+    Path("assets/robot/piper_l/urdf/piper_l_fixed_gripper.urdf"),
+    Path("assets/robot/piper_l/urdf/cca_config.yaml"),
     device=device,
 )
-
-# slist：空间螺旋轴矩阵，形状 [6, n]。每一列描述一个机器人关节的
-# 旋转/平移轴及其空间位置，规划器用它计算正运动学和雅可比矩阵。
-slist = robot.slist
-
-# M（这里命名为 home_pose）：所有关节为零时，TCP（工具中心点/末端）
-# 相对机器人基座的 4x4 齐次变换矩阵。
-home_pose = robot.M
-
-# q0：每个环境的初始关节角，形状 [B, n]。这里先复制相同零位；在 Isaac Lab
-# 中可直接传入每个环境当前的机器人关节位置。
 q0 = robot.joint_states.expand(B, -1).clone()
 
-# tcp：由 slist、M 和 q0 算出的当前末端位置，形状 [B, 3]。
-tcp = cca.fkin_space(home_pose, slist, q0)[:, :3, 3]
+# Cabinet URDF 放在 (0.70, 0, 0.20)，并绕 z 轴旋转 pi 使正面朝向机器人。
+# 下面两个局部坐标直接来自 door_joint_1 与 door 把手。
+cabinet_positions = torch.tensor((0.70, 0.0, 0.20), device=device).expand(B, -1)
+yaw_pi_signs = torch.tensor((-1.0, -1.0, 1.0), device=device)
+hinge_local = torch.tensor((0.119816, -0.275279, 0.104384), device=device)
+handle_local = torch.tensor((0.165816, -0.025555, 0.165822), device=device)
+hinge_positions = cabinet_positions + yaw_pi_signs * hinge_local
+handle_positions = cabinet_positions + yaw_pi_signs * handle_local
+hinge_axes = torch.tensor((0.0, 0.0, 1.0), device=device).expand(B, -1)
+door_screws = cca.get_screw(cca.ScrewType.ROTATION, hinge_axes, hinge_positions)
+open_angles = torch.linspace(-math.pi / 3, -math.pi / 4, B, device=device)
 
-# axis：每个阀门的转轴方向，形状 [B, 3]；这里都绕基座坐标系 +x 轴旋转。
-axis = torch.tensor([1., 0., 0.], device=device, dtype=dtype).expand(B, -1)
-
-# radii：每个阀门的半径，形状 [B]。使用不同半径演示异构批输入。
-radii = torch.linspace(0.05, 0.085, B, device=device, dtype=dtype)
-
-# centres：阀门中心，形状 [B, 3]。假定 TCP 当前位于阀门上沿，因此阀门中心
-# 等于 TCP 沿 -z 方向移动一个半径。若阀门离末端较远，应先用位姿 IK 求抓取状态。
-grasp_direction = torch.tensor([0., 0., 1.], device=device, dtype=dtype)
-centres = tcp - radii[:, None] * grasp_direction
-
-# valve_screws：把“绕 axis、经过 centres 旋转”编码为 6 维可供性螺旋轴。
-# 这就是闭链任务中物体一侧的运动约束。
-valve_screws = cca.get_screw(cca.ScrewType.ROTATION, axis, centres)
-
-# turn_angles：每个环境期望转动的弧度，形状 [B]，可以全部不同。
-turn_angles = torch.linspace(0.6, 1.2, B, device=device, dtype=dtype)
-
-# 收敛参数集中在 PlannerConfig；这里只覆盖最大 IK 迭代次数。
-config = cca.PlannerConfig(ik_max_itr=50)
+config = cca.PlannerConfig(ik_max_itr=150)
 planner = cca.PlannerInterface(
     config,
-    early_stopping=False,                   # 默认固定迭代，避免每轮同步到主机
-    use_regularized_normal_equations=True,  # 用正则化法方程代替两处 SVD
+    early_stopping=True,
+    use_regularized_normal_equations=True,
+)
+
+# CCA 从接触状态开始，因此先用 Pose IK 求解把手抓取位姿。
+initial_pose = cca.fkin_space(robot.M, robot.slist, q0)
+grasp_roll = torch.tensor(
+    [[1., 0., 0.], [0., 0., 1.], [0., -1., 0.]], device=device
+)
+grasp_pose = initial_pose.clone()
+grasp_pose[:, :3, :3] = initial_pose[:, :3, :3] @ grasp_roll
+grasp_pose[:, :3, 3] = handle_positions
+grasp_joints, ik_success = planner.solve_pose_ik(
+    robot_slist=robot.slist,
+    robot_m=robot.M,
+    joint_seed=q0,
+    target_pose=grasp_pose,
 )
 
 result = planner.generate_joint_trajectory(
-    robot_slist=slist,             # [6, n] 可由所有环境共享，也可传 [B, 6, n]
-    robot_m=home_pose,             # 零位 TCP 位姿：[4, 4] 或 [B, 4, 4]
-    joint_states=q0,               # 每个环境的初始关节角：[B, n]
-    affordance_screw=valve_screws, # 每个阀门的 6 维运动螺旋轴：[B, 6]
-    goal_affordance=turn_angles,   # 每个阀门的目标转角：[B]
-    trajectory_density=12,         # 输出点数，包含初始状态，因此内部求解 11 个目标点
-    vir_screw_order=cca.VirtualScrewOrder.XYZ, # 允许末端姿态通过 XYZ 虚拟关节调整
+    robot_slist=robot.slist,
+    robot_m=robot.M,
+    joint_states=grasp_joints,
+    affordance_screw=door_screws,
+    goal_affordance=open_angles,
+    trajectory_density=12,
+    # Door 把手竖直，因此抓取只允许绕把手的 z 轴转动。
+    vir_screw_order=cca.VirtualScrewOrder.Z,
 )
 
 trajectory = result.joint_trajectory  # [B, 12, n]，绝对机器人关节轨迹
-full_success = result.full_success    # [B]，该环境所有轨迹点是否都收敛
+full_success = ik_success & result.full_success
 valid_steps = result.valid_mask       # [B, 11]，逐目标点的收敛状态
 ```
 
@@ -125,17 +120,17 @@ CCA 始终使用 inverse 更新，并在接近奇异时根据条件数自动切�
 
 ## 示例
 
-- [`examples/demo_valve.py`](examples/demo_valve.py)：先用批量 IK 求随机阀门抓取点，
-  再沿旋转螺旋轴规划阀门转动。
-- [`examples/demo_drawer.py`](examples/demo_drawer.py)：先用批量 IK 求随机抽屉把手抓取点，
-  再沿平移螺旋轴规划抽屉拉动。
+- [`examples/demo_cabinet_door.py`](examples/demo_cabinet_door.py)：Piper 抓住
+  cabinet 的竖直 door 把手，允许绕把手轴转动，再绕铰链打开门。
+- [`examples/demo_cabinet_drawer.py`](examples/demo_cabinet_drawer.py)：Piper 抓住
+  drawer 1 的水平把手，允许绕把手轴转动，再沿滑轨拉开抽屉。
 
 每个脚本都独立包含完整的最小规划流程；只有机器人网格、物体几何、轨迹着色和动画
 共用 [`ViserVisualizer`](examples/visualizer.py)。
 
 ```bash
-python examples/demo_valve.py
-python examples/demo_drawer.py
+python examples/demo_cabinet_door.py
+python examples/demo_cabinet_drawer.py
 ```
 
 先执行 `pip install -e ".[dev]"` 安装测试依赖，再运行两个默认 4096 环境的性能对比：

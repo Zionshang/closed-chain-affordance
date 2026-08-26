@@ -10,7 +10,7 @@ returns dense tensors suitable for GPU simulation and reinforcement learning.
 pip install -e .
 ```
 
-Install the optional valve-demo viewer dependencies with:
+Install the optional cabinet-demo viewer dependencies with:
 
 ```bash
 pip install -e ".[viewer]"
@@ -22,53 +22,71 @@ The import name is `cca_planner`:
 import cca_planner as cca
 ```
 
-## Minimal batched valve turn
+## Minimal batched cabinet-door task
 
 ```python
 from pathlib import Path
+import math
 
 import torch
 import cca_planner as cca
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-dtype = torch.float32
 batch_size = 64
 
-# Load the space screw axes (slist), home TCP pose (M), and initial arm joints.
 robot = cca.load_robot_from_urdf(
-    Path("assets/robot/x5/urdf/x5.urdf"),
-    Path("examples/x5_urdf_config.yaml"),
+    Path("assets/robot/piper_l/urdf/piper_l_fixed_gripper.urdf"),
+    Path("assets/robot/piper_l/urdf/cca_config.yaml"),
     device=device,
 )
-slist = robot.slist                         # [6, n], robot joint screw axes
-home_pose = robot.M                         # [4, 4], TCP pose at zero joints
-q0 = robot.joint_states.expand(batch_size, -1).clone()  # [B, n]
+q0 = robot.joint_states.expand(batch_size, -1).clone()
 
-# Current TCP positions are used to place one slightly different valve per env.
-tcp = cca.fkin_space(home_pose, slist, q0)[:, :3, 3]     # [B, 3]
-axis = torch.tensor([1., 0., 0.], device=device, dtype=dtype).expand(batch_size, -1)
-radii = torch.linspace(0.05, 0.085, batch_size, device=device, dtype=dtype)
-centres = tcp - radii[:, None] * torch.tensor([0., 0., 1.], device=device, dtype=dtype)
-valve_screws = cca.get_screw(cca.ScrewType.ROTATION, axis, centres)  # [B, 6]
-turn_angles = torch.linspace(0.6, 1.2, batch_size, device=device, dtype=dtype)
+# The cabinet URDF is placed at (0.70, 0, 0.20) with a pi yaw so its front
+# faces the robot. These local points come from door_joint_1 and its handle.
+cabinet_positions = torch.tensor((0.70, 0.0, 0.20), device=device).expand(batch_size, -1)
+yaw_pi_signs = torch.tensor((-1.0, -1.0, 1.0), device=device)
+hinge_local = torch.tensor((0.119816, -0.275279, 0.104384), device=device)
+handle_local = torch.tensor((0.165816, -0.025555, 0.165822), device=device)
+hinge_positions = cabinet_positions + yaw_pi_signs * hinge_local
+handle_positions = cabinet_positions + yaw_pi_signs * handle_local
+hinge_axes = torch.tensor((0.0, 0.0, 1.0), device=device).expand(batch_size, -1)
+door_screws = cca.get_screw(cca.ScrewType.ROTATION, hinge_axes, hinge_positions)
+open_angles = torch.linspace(-math.pi / 3, -math.pi / 4, batch_size, device=device)
 
 planner = cca.PlannerInterface(
-    cca.PlannerConfig(ik_max_itr=50),
-    early_stopping=False,                    # avoid a host sync on every IK iteration
-    use_regularized_normal_equations=True,   # replace two SVD pseudoinverse products
+    cca.PlannerConfig(ik_max_itr=150),
+    early_stopping=True,
+    use_regularized_normal_equations=True,
 )
+
+# CCA starts at contact, so solve the cabinet-handle grasp pose first.
+initial_pose = cca.fkin_space(robot.M, robot.slist, q0)
+grasp_roll = torch.tensor(
+    [[1., 0., 0.], [0., 0., 1.], [0., -1., 0.]], device=device
+)
+grasp_pose = initial_pose.clone()
+grasp_pose[:, :3, :3] = initial_pose[:, :3, :3] @ grasp_roll
+grasp_pose[:, :3, 3] = handle_positions
+grasp_joints, ik_success = planner.solve_pose_ik(
+    robot_slist=robot.slist,
+    robot_m=robot.M,
+    joint_seed=q0,
+    target_pose=grasp_pose,
+)
+
 result = planner.generate_joint_trajectory(
-    robot_slist=slist,            # shared [6, n] or batched [B, 6, n]
-    robot_m=home_pose,            # shared [4, 4] or batched [B, 4, 4]
-    joint_states=q0,              # initial arm state, [B, n]
-    affordance_screw=valve_screws,# valve rotation screw for every environment
-    goal_affordance=turn_angles,  # different requested turn angle per environment
-    trajectory_density=12,        # output points including the initial state
-    vir_screw_order=cca.VirtualScrewOrder.XYZ,
+    robot_slist=robot.slist,
+    robot_m=robot.M,
+    joint_states=grasp_joints,
+    affordance_screw=door_screws,
+    goal_affordance=open_angles,
+    trajectory_density=12,
+    # The handle is vertical: allow grasp roll only around the handle's z axis.
+    vir_screw_order=cca.VirtualScrewOrder.Z,
 )
 
 trajectory = result.joint_trajectory  # [B, 12, n]
-full_success = result.full_success    # [B]
+full_success = ik_success & result.full_success
 valid_steps = result.valid_mask       # [B, 11]
 ```
 
@@ -88,17 +106,19 @@ canonical pose independently of trajectory-planning success.
 
 ## Examples
 
-- [`examples/demo_valve.py`](examples/demo_valve.py): solve randomized valve-rim
-  contact poses with batched IK, then plan each turn around its rotation screw.
-- [`examples/demo_drawer.py`](examples/demo_drawer.py): solve randomized handle
-  contact poses with batched IK, then plan each pull along its translation screw.
+- [`examples/demo_cabinet_door.py`](examples/demo_cabinet_door.py): Piper grasps
+  the cabinet's vertical door handle, remains free to roll about that handle,
+  and opens the door about its hinge.
+- [`examples/demo_cabinet_drawer.py`](examples/demo_cabinet_drawer.py): Piper
+  grasps drawer 1's horizontal handle, remains free to roll about the handle,
+  and pulls the drawer along its rail.
 
 Each script contains its complete minimal planning flow. Only the reusable
 [`ViserVisualizer`](examples/visualizer.py) is shared. Run them with:
 
 ```bash
-python examples/demo_valve.py
-python examples/demo_drawer.py
+python examples/demo_cabinet_door.py
+python examples/demo_cabinet_drawer.py
 ```
 
 Install the development extra with `pip install -e ".[dev]"`, then run the two

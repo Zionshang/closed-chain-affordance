@@ -47,143 +47,122 @@ class TaskScene(Protocol):
     ) -> Callable[[int], None] | None: ...
 
 
-class _ValveScene:
+def _quaternion(rotation: np.ndarray) -> np.ndarray:
+    return Rotation.from_matrix(rotation).as_quat()[[3, 0, 1, 2]]
+
+
+def _rotation_and_scale(transform: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Separate the rotation and per-axis scale stored in a scene transform."""
+    linear = transform[:3, :3]
+    scale = np.linalg.norm(linear, axis=0)
+    if np.any(scale <= np.finfo(scale.dtype).eps):
+        raise ValueError("URDF visual geometry contains a zero scale")
+    rotation = linear / scale
+    if np.linalg.det(rotation) < 0.0:
+        scale[-1] *= -1.0
+        rotation[:, -1] *= -1.0
+    return rotation, scale
+
+
+class _CabinetUrdfScene:
+    """Animate one cabinet joint using the same URDF that defines the task."""
+
     def __init__(
         self,
-        centres,
-        radii,
-        angles,
-        approach_points,
-        rotation_axis,
-        grasp_direction,
-        rim_points,
-        failed_color,
-    ):
-        self.centres = as_numpy(centres)
-        self.radii = as_numpy(radii)
-        self.angles = as_numpy(angles)
-        self.approach_points = approach_points
-        self.rotation_axis = np.asarray(rotation_axis, dtype=float)
-        self.grasp_direction = np.asarray(grasp_direction, dtype=float)
-        self.rim_points = rim_points
-        self.failed_color = failed_color
-
-    def __call__(self, server, offsets, success_mask, trajectory_steps):
-        axis = self.rotation_axis / np.linalg.norm(self.rotation_axis)
-        grasp = self.grasp_direction / np.linalg.norm(self.grasp_direction)
-        tangent = np.cross(axis, grasp)
-        tangent /= np.linalg.norm(tangent)
-        theta = np.linspace(0, 2 * np.pi, self.rim_points, endpoint=False)
-        handles = []
-        for index, (centre, radius) in enumerate(zip(self.centres, self.radii)):
-            rim = radius * (
-                np.cos(theta)[:, None] * grasp
-                + np.sin(theta)[:, None] * tangent
-            )
-            segments = np.concatenate(
-                [
-                    np.stack([rim, np.roll(rim, -1, axis=0)], axis=1),
-                    np.array([[[0.0, 0.0, 0.0], radius * grasp]]),
-                ],
-                axis=0,
-            )
-            color = (255, 160, 40) if success_mask[index] else self.failed_color
-            handles.append(
-                server.scene.add_line_segments(
-                    f"tasks/valve/{index}",
-                    points=segments,
-                    colors=color,
-                    line_width=3.0,
-                    position=centre + offsets[index],
-                )
-            )
-
-        action_steps = trajectory_steps - self.approach_points
-
-        def update(frame):
-            fraction = np.clip(
-                (frame - self.approach_points + 1) / max(action_steps, 1), 0.0, 1.0
-            )
-            for handle, angle in zip(handles, self.angles):
-                half_angle = 0.5 * angle * fraction
-                handle.wxyz = np.concatenate(
-                    [[np.cos(half_angle)], axis * np.sin(half_angle)]
-                )
-
-        return update
-
-
-class _DrawerScene:
-    def __init__(
-        self,
+        urdf_path,
+        cabinet_positions,
+        cabinet_yaw,
+        joint_name,
+        joint_goals,
+        motion_axis_segments,
         handle_positions,
-        pull_distances,
-        approach_points,
-        pull_axis,
-        cabinet_dimensions,
-        drawer_front_thickness,
-        handle_dimensions,
+        handle_axis,
         failed_color,
     ):
+        self.urdf_path = urdf_path
+        self.cabinet_positions = as_numpy(cabinet_positions)
+        self.cabinet_yaw = float(cabinet_yaw)
+        self.joint_name = joint_name
+        self.joint_goals = as_numpy(joint_goals)
+        self.motion_axis_segments = as_numpy(motion_axis_segments)
         self.handle_positions = as_numpy(handle_positions)
-        self.pull_distances = as_numpy(pull_distances)
-        self.approach_points = approach_points
-        self.pull_axis = np.asarray(pull_axis, dtype=float)
-        self.cabinet_depth, self.cabinet_width, self.cabinet_height = cabinet_dimensions
-        self.front_thickness = drawer_front_thickness
-        self.handle_depth, self.handle_width, self.handle_height = handle_dimensions
+        self.handle_axis = np.asarray(handle_axis, dtype=float)
         self.failed_color = failed_color
 
     def __call__(self, server, offsets, success_mask, trajectory_steps):
-        axis = self.pull_axis / np.linalg.norm(self.pull_axis)
-        moving_handles = []
-        for index, handle_position in enumerate(self.handle_positions):
-            offset = offsets[index]
-            front_center = handle_position - self.handle_depth * axis
-            cabinet_center = front_center - 0.5 * self.cabinet_depth * axis
-            server.scene.add_box(
-                f"tasks/drawer/{index}/cabinet",
-                color=(65, 72, 82),
-                dimensions=(self.cabinet_depth, self.cabinet_width, self.cabinet_height),
-                wireframe=True,
-                position=cabinet_center + offset,
+        cabinet = yourdfpy.URDF.load(str(self.urdf_path))
+        geometry_nodes = list(cabinet.scene.graph.nodes_geometry)
+        meshes = {
+            node: cabinet.scene.geometry[node].copy() for node in geometry_nodes
+        }
+        joint_index = cabinet.actuated_joint_names.index(self.joint_name)
+        cabinet_rotation = Rotation.from_euler("z", self.cabinet_yaw).as_matrix()
+
+        def transforms(joint_value, position, offset):
+            config = np.zeros(len(cabinet.actuated_joint_names), dtype=float)
+            config[joint_index] = joint_value
+            cabinet.update_cfg(config)
+            base = np.eye(4)
+            base[:3, :3] = cabinet_rotation
+            base[:3, 3] = position + offset
+            graph = cabinet.scene.graph
+            return [base @ graph.get(node)[0] for node in geometry_nodes]
+
+        cabinet_handles = []
+        normalized_handle_axis = self.handle_axis / np.linalg.norm(self.handle_axis)
+        for environment, position in enumerate(self.cabinet_positions):
+            environment_handles = []
+            initial_transforms = transforms(0.0, position, offsets[environment])
+            for link_index, (node, transform) in enumerate(
+                zip(geometry_nodes, initial_transforms)
+            ):
+                rotation, scale = _rotation_and_scale(transform)
+                handle = server.scene.add_mesh_trimesh(
+                    f"tasks/cabinet/{environment}/link{link_index}",
+                    meshes[node],
+                    scale=tuple(scale),
+                )
+                handle.position = transform[:3, 3]
+                handle.wxyz = _quaternion(rotation)
+                environment_handles.append(handle)
+            cabinet_handles.append(environment_handles)
+
+            axis_color = (
+                (20, 220, 190)
+                if success_mask[environment]
+                else self.failed_color
             )
-            color = (45, 130, 210) if success_mask[index] else self.failed_color
-            front = server.scene.add_box(
-                f"tasks/drawer/{index}/front",
-                color=color,
-                dimensions=(
-                    self.front_thickness,
-                    self.cabinet_width * 0.9,
-                    self.cabinet_height * 0.78,
-                ),
-                position=front_center + offset,
-            )
-            handle = server.scene.add_box(
-                f"tasks/drawer/{index}/handle",
-                color=(235, 190, 55),
-                dimensions=(self.handle_depth, self.handle_width, self.handle_height),
-                position=handle_position + offset,
-            )
-            end = handle_position + axis * self.pull_distances[index]
             server.scene.add_line_segments(
-                f"tasks/drawer/{index}/pull_axis",
-                points=np.array([[handle_position + offset, end + offset]]),
-                colors=(20, 220, 190),
+                f"tasks/cabinet/{environment}/motion_axis",
+                points=self.motion_axis_segments[environment][None, ...]
+                + offsets[environment],
+                colors=axis_color,
                 line_width=3.0,
             )
-            moving_handles.append((front, front_center + offset, handle, handle_position + offset))
-
-        action_steps = trajectory_steps - self.approach_points
+            half_handle = 0.065 * normalized_handle_axis
+            handle_position = self.handle_positions[environment]
+            server.scene.add_line_segments(
+                f"tasks/cabinet/{environment}/handle_axis",
+                points=np.array(
+                    [[handle_position - half_handle, handle_position + half_handle]]
+                )
+                + offsets[environment],
+                colors=(255, 220, 80),
+                line_width=4.0,
+            )
 
         def update(frame):
-            fraction = np.clip(
-                (frame - self.approach_points + 1) / max(action_steps, 1), 0.0, 1.0
-            )
-            for index, (front, front_start, handle, handle_start) in enumerate(moving_handles):
-                displacement = axis * self.pull_distances[index] * fraction
-                front.position = front_start + displacement
-                handle.position = handle_start + displacement
+            fraction = frame / max(trajectory_steps - 1, 1)
+            for environment, handles in enumerate(cabinet_handles):
+                current_transforms = transforms(
+                    self.joint_goals[environment] * fraction,
+                    self.cabinet_positions[environment],
+                    offsets[environment],
+                )
+                for handle, transform in zip(handles, current_transforms):
+                    rotation, _ = _rotation_and_scale(transform)
+                    handle.position = transform[:3, 3]
+                    handle.wxyz = _quaternion(rotation)
 
         return update
 
@@ -255,21 +234,11 @@ class ViserVisualizer:
 
     @staticmethod
     def _quaternion(rotation: np.ndarray) -> np.ndarray:
-        return Rotation.from_matrix(rotation).as_quat()[[3, 0, 1, 2]]
+        return _quaternion(rotation)
 
     @staticmethod
     def _rotation_and_scale(transform: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Separate the rotation and per-axis scale stored in a scene transform."""
-        linear = transform[:3, :3]
-        scale = np.linalg.norm(linear, axis=0)
-        if np.any(scale <= np.finfo(scale.dtype).eps):
-            raise ValueError("URDF visual geometry contains a zero scale")
-
-        rotation = linear / scale
-        if np.linalg.det(rotation) < 0.0:
-            scale[-1] *= -1.0
-            rotation[:, -1] *= -1.0
-        return rotation, scale
+        return _rotation_and_scale(transform)
 
     def _add_path(
         self,
@@ -293,74 +262,90 @@ class ViserVisualizer:
             line_width=2.0,
         )
 
-    def show_valves(
+    def show_cabinet_door(
         self,
         joint_trajectory,
         valid_mask,
         success_mask,
-        centres,
-        radii,
-        angles,
-        approach_points,
+        cabinet_urdf_path,
+        cabinet_positions,
+        hinge_positions,
+        handle_positions,
+        open_angles,
         *,
-        rotation_axis=(1.0, 0.0, 0.0),
-        grasp_direction=(0.0, 0.0, 1.0),
-        rim_points=48,
+        cabinet_yaw=np.pi,
+        handle_axis=(0.0, 0.0, 1.0),
     ):
-        """Visualize valve rotation, optionally preceded by an approach."""
+        """Visualize a cabinet door rotating about its vertical hinge."""
         steps = as_numpy(joint_trajectory).shape[1]
+        hinge_positions = as_numpy(hinge_positions)
+        hinge_axis = np.asarray((0.0, 0.0, 1.0))
+        axis_segments = np.stack(
+            [
+                hinge_positions - 0.25 * hinge_axis,
+                hinge_positions + 0.25 * hinge_axis,
+            ],
+            axis=1,
+        )
         self.show(
             joint_trajectory,
             valid_mask,
             success_mask,
-            [
-                TrajectoryPhase("approach", 0, approach_points, (89, 191, 255)),
-                TrajectoryPhase("turn", approach_points - 1, steps, (255, 160, 40)),
-            ],
-            task_scene=_ValveScene(
-                centres,
-                radii,
-                angles,
-                approach_points,
-                rotation_axis,
-                grasp_direction,
-                rim_points,
+            [TrajectoryPhase("open_door", 0, steps, (255, 160, 40))],
+            task_scene=_CabinetUrdfScene(
+                cabinet_urdf_path,
+                cabinet_positions,
+                cabinet_yaw,
+                "door_joint_1",
+                open_angles,
+                axis_segments,
+                handle_positions,
+                handle_axis,
                 self.config.failed_color,
             ),
         )
 
-    def show_drawers(
+    def show_cabinet_drawer_1(
         self,
         joint_trajectory,
         valid_mask,
         success_mask,
+        cabinet_urdf_path,
+        cabinet_positions,
         handle_positions,
         pull_distances,
-        approach_points,
         *,
+        cabinet_yaw=np.pi,
         pull_axis=(-1.0, 0.0, 0.0),
-        cabinet_dimensions=(0.28, 0.34, 0.20),
-        drawer_front_thickness=0.025,
-        handle_dimensions=(0.035, 0.14, 0.025),
+        handle_axis=(0.0, -1.0, 0.0),
     ):
-        """Visualize drawer translation, optionally preceded by an approach."""
+        """Visualize drawer 1 translating out of a three-drawer cabinet."""
         steps = as_numpy(joint_trajectory).shape[1]
+        handle_positions = as_numpy(handle_positions)
+        pull_distances = as_numpy(pull_distances)
+        normalized_pull_axis = np.asarray(pull_axis, dtype=float)
+        normalized_pull_axis /= np.linalg.norm(normalized_pull_axis)
+        axis_segments = np.stack(
+            [
+                handle_positions,
+                handle_positions + pull_distances[:, None] * normalized_pull_axis,
+            ],
+            axis=1,
+        )
         self.show(
             joint_trajectory,
             valid_mask,
             success_mask,
-            [
-                TrajectoryPhase("approach", 0, approach_points, (89, 191, 255)),
-                TrajectoryPhase("pull", approach_points - 1, steps, (20, 220, 190)),
-            ],
-            task_scene=_DrawerScene(
+            [TrajectoryPhase("open_drawer_1", 0, steps, (20, 220, 190))],
+            task_scene=_CabinetUrdfScene(
+                cabinet_urdf_path,
+                cabinet_positions,
+                cabinet_yaw,
+                "drawer_joint_1",
+                -pull_distances,
+                axis_segments,
                 handle_positions,
-                pull_distances,
-                approach_points,
-                pull_axis,
-                cabinet_dimensions,
-                drawer_front_thickness,
-                handle_dimensions,
+                handle_axis,
                 self.config.failed_color,
             ),
         )

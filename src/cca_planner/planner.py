@@ -50,6 +50,9 @@ _DESC_FROM_CODE = {v: k for k, v in _DESC_CODE.items()}
 
 # Virtual-screw axis matrices keyed by VirtualScrewOrder (columns = ordered axes).
 _VIR_SCREW_AXES = {
+    VirtualScrewOrder.X: ((1.0, 0.0, 0.0),),
+    VirtualScrewOrder.Y: ((0.0, 1.0, 0.0),),
+    VirtualScrewOrder.Z: ((0.0, 0.0, 1.0),),
     VirtualScrewOrder.XYZ: ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
     VirtualScrewOrder.YZX: ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
     VirtualScrewOrder.ZXY: ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
