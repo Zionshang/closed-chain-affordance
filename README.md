@@ -93,6 +93,8 @@ affordance_util::RobotDescription robot_description;
 robot_description.slist = ; // Eigen::MatrixXd with robot joint screws as its columns in order
 robot_description.M = ; // Eigen::Matrix4d representing the homogenous transformation matrix for the EE (palm) at home position
 robot_description.joint_states = ; // Eigen::VectorXd representing the joint states of the robot in order at the start config of the affordance
+robot_description.joint_lower_limits = ; // Optional absolute lower limits; empty means unbounded
+robot_description.joint_upper_limits = ; // Optional absolute upper limits; empty means unbounded
 ```
 
 4. Furnish task description. Here is an example for rotation motion. More examples in Task Examples section.
@@ -185,11 +187,110 @@ plannerConfig.closure_err_threshold_lin = 1e-5; // Threshold for the closed-chai
 plannerConfig.ik_max_itr = 200; // Limit for the number of iterations for the closed-chain IK solver
 ```
 
+##### Reserve-Mobility CCA (RM-CCA)
+
+RM-CCA uses one strict task hierarchy throughout every Newton iteration:
+
+1. complete the original CCA correction `Jc * dx = e`;
+2. keep a floating base (or another reserve chain) stationary inside the primary-task null space.
+
+With `dx0 = Jc^+ e`, `Nc = I - Jc^+ Jc`, and `B` selecting reserve coordinates, the correction is
+
+```text
+dx = dx0 - Nc (B Nc)^+ B dx0.
+```
+
+Therefore, whenever an arm-only solution exists, the base correction is zero exactly (up to floating-point error).
+When joint bounds or truncated-SVD rank loss remove feasible arm directions, the same expression is recomputed over
+the remaining feasible variables and retains only the base motion that can no longer be eliminated. Bound handling is
+direction-aware: a joint is frozen only for the current active-set solve and can reactivate inward on the next Newton
+iteration. Closure correction uses the identical hierarchy and preserves the CCA secondary state already advanced by
+the main Newton step. There is no arm/base phase switch, QP, weighting cost, or optimizer.
+
+```cpp
+// Prefer this helper after robot_builder(): it copies URDF/YAML limits into RobotDescription.
+auto robot_description = affordance_util::make_robot_description(
+    robot_config, current_arm_joint_states);
+
+cc_affordance_planner::TaskDescription task_description;
+// ...set affordance and goal as in the examples above...
+
+task_description.reserve_mobility =
+    affordance_util::make_floating_base_reserve_description(
+        Eigen::Matrix4d::Identity(),
+        0.02, // maximum translation increment per Newton iteration [m]
+        0.05  // maximum rotation increment per Newton iteration [rad]
+    );
+
+cc_affordance_planner::PlannerConfig config;
+config.svd_relative_tolerance = 1e-8;
+config.residual_mobility_tolerance = 1e-10;
+config.joint_limit_margin = 1e-6;
+
+cc_affordance_planner::CcAffordancePlannerInterface planner(config);
+auto result = planner.generate_joint_trajectory(robot_description, task_description);
+```
+
+When reserve mobility is enabled, the planner always uses its pseudoinverse path and does not start the transpose
+thread, even if `update_method` is `BEST`. `result.joint_trajectory` retains the arm/secondary layout used by the
+fixed-base interface, while `result.reserve_trajectory` and `result.reserve_pose_trajectory` contain the separate base
+trajectory. `reserve_active`, `residual_mobility_norm` (the maximum reserve correction norm used while solving that
+point), and `active_arm_dof_count` are aligned with those trajectory points.
+
+##### Python bindings and cabinet Viser demos
+
+The optional `cca_cpp` pybind11 module exposes robot construction from URDF/YAML, the robot/task/config structures,
+the planner interface, floating-base reserve construction, RM diagnostics, and FK/Jacobian helpers. The Python
+superbuild compiles both C++ libraries from this checkout, so it does not accidentally bind a stale system install.
+
+The dependencies have been installed in the `cca_fb` Conda environment on this workspace. To reproduce the setup:
+
+```bash
+source /home/zishang/miniconda3/etc/profile.d/conda.sh
+conda activate cca_fb
+python -m pip install -r python/requirements-viewer.txt
+```
+
+Build the extension (this machine obtains `urdfdom` from ROS Jazzy):
+
+```bash
+cmake -S python -B python/build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=/opt/ros/jazzy \
+  -Dpybind11_DIR="$(python -m pybind11 --cmakedir)" \
+  -DPython3_EXECUTABLE="$(command -v python)"
+cmake --build python/build --target cca_cpp --parallel
+```
+
+Only the two migrated cabinet tasks are kept as executable Python examples. Run their pose-IK, RM-CCA, joint-limit,
+and endpoint assertions without a viewer:
+
+```bash
+python python/examples/demo_cabinet_drawer.py
+python python/examples/demo_cabinet_door.py
+```
+
+Start either real-mesh Viser animation:
+
+```bash
+python python/examples/demo_cabinet_drawer.py --visualize  # localhost:8081
+python python/examples/demo_cabinet_door.py --visualize    # localhost:8080
+```
+
+Both tasks preserve the Piper-L, cabinet placement, handle/hinge definitions, and free virtual handle axis from the
+other project. The goals are deterministic: drawer pull is fixed at `0.15 m` and door opening is fixed at `-pi/2`
+(90 degrees). For a reproducible capability-exhaustion demonstration, the real URDF limits are intersected with a
+±0.15-rad operating envelope around the grasp. Each example internally verifies that a numerically frozen base returns
+`PARTIAL`, and that the assisted plan has a bit-identical arm-only prefix before the base moves and returns `FULL`.
+Viser renders only that single assisted environment: drawer base assistance starts at point 6 after the arm-only plan
+stops at 5/12; door assistance starts at point 3 after the arm-only plan stops at 2/12. The real Piper-L and articulated
+cabinet DAE meshes are loaded directly from `python/assets`.
+
 Optional task description parameters:
 ```cpp
 task_description.goal.ee_orientation = Eigen::Vector3d(0.1, 0.0, 0.1); // EE orientation to maintain along the affordance path, rpy = [0.1,0.0,0.1] for instance. Can specify one or more aspections of the orientation in the order specified by VirScrewOrder below.
 task_description.trajectory_density = 10; // Number of points in the solved joint trajectory, 10 for example
-task_description.vir_screw_order = affordance_util::VirtualScrewOrder::XYZ; // Order of the axes in the closed-chain model virtual gripper joint. Possible values are XYZ, YZX, ZXY, and NONE.
+task_description.vir_screw_order = affordance_util::VirtualScrewOrder::XYZ; // Order of the axes in the closed-chain model virtual gripper joint. Possible values include X, Y, Z, XY, YZ, ZX, XYZ, YZX, ZXY, and NONE.
 
 // For affordance, one can directly specify the 6x1 screw vector for affordance instead of axis and location
 aff.type = affordance_util::ScrewType::TRANSLATION;

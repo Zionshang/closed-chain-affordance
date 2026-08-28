@@ -1,5 +1,8 @@
 #include <affordance_util/affordance_util.hpp>
 #include <cc_affordance_planner/cc_affordance_planner_interface.hpp>
+#include <cmath>
+#include <limits>
+#include <numeric>
 
 namespace cc_affordance_planner
 {
@@ -41,6 +44,21 @@ CcAffordancePlannerInterface::CcAffordancePlannerInterface(const PlannerConfig &
 
         throw std::invalid_argument("Planner config: 'ik_max_itr' must be in the range [2, 100000]");
     }
+    if (!(planner_config.svd_relative_tolerance > 0.0) ||
+        !std::isfinite(planner_config.svd_relative_tolerance))
+    {
+        throw std::invalid_argument("Planner config: 'svd_relative_tolerance' must be finite and positive.");
+    }
+    if (planner_config.residual_mobility_tolerance < 0.0 ||
+        !std::isfinite(planner_config.residual_mobility_tolerance))
+    {
+        throw std::invalid_argument("Planner config: 'residual_mobility_tolerance' must be finite and non-negative.");
+    }
+    if (planner_config.joint_limit_margin < 0.0 || !std::isfinite(planner_config.joint_limit_margin) ||
+        planner_config.joint_limit_tolerance < 0.0 || !std::isfinite(planner_config.joint_limit_tolerance))
+    {
+        throw std::invalid_argument("Planner config: joint-limit margin and tolerance must be finite and non-negative.");
+    }
 }
 
 PlannerResult CcAffordancePlannerInterface::generate_joint_trajectory(
@@ -52,6 +70,69 @@ PlannerResult CcAffordancePlannerInterface::generate_joint_trajectory(
 
     // Output of the function
     PlannerResult plannerResult;
+
+    affordance_util::ReserveMobilityDescription reserve_mobility = task_description.reserve_mobility;
+    Eigen::Index feasible_arm_dof_for_diagnostics = robot_description.joint_states.size();
+    if (reserve_mobility.enabled)
+    {
+        const Eigen::Index reserve_dof = reserve_mobility.slist.cols();
+        const Eigen::Index virtual_dof = task_description.vir_screw_order == affordance_util::VirtualScrewOrder::NONE
+                                             ? 0
+                                             : affordance_util::get_vir_screw_axes(task_description.vir_screw_order).cols();
+        const Eigen::Index controlled_virtual_dof = task_description.goal.ee_orientation.size();
+        if (controlled_virtual_dof > virtual_dof)
+        {
+            throw std::invalid_argument("EE-orientation goals exceed the selected virtual-screw DOF.");
+        }
+        // Uncontrolled virtual EE joints are free primary grasp motions. They belong on the arm side of the
+        // reserve partition with a zero initial state and unbounded limits; otherwise RM-CCA would leave primary
+        // columns outside both the feasible-arm and reserve sets.
+        const Eigen::Index free_virtual_dof = virtual_dof - controlled_virtual_dof;
+        const Eigen::Index feasible_arm_dof = robot_description.joint_states.size() + free_virtual_dof;
+        feasible_arm_dof_for_diagnostics = feasible_arm_dof;
+        if (reserve_mobility.lower_limits.size() == 0)
+        {
+            reserve_mobility.lower_limits =
+                Eigen::VectorXd::Constant(reserve_dof, -std::numeric_limits<double>::infinity());
+            reserve_mobility.upper_limits =
+                Eigen::VectorXd::Constant(reserve_dof, std::numeric_limits<double>::infinity());
+        }
+        if (reserve_mobility.max_step.size() == 0)
+        {
+            reserve_mobility.max_step =
+                Eigen::VectorXd::Constant(reserve_dof, std::numeric_limits<double>::infinity());
+        }
+
+        Eigen::VectorXd arm_lower = robot_description.joint_lower_limits;
+        Eigen::VectorXd arm_upper = robot_description.joint_upper_limits;
+        if (arm_lower.size() == 0)
+        {
+            arm_lower = Eigen::VectorXd::Constant(robot_description.joint_states.size(),
+                                                   -std::numeric_limits<double>::infinity());
+            arm_upper = Eigen::VectorXd::Constant(robot_description.joint_states.size(),
+                                                   std::numeric_limits<double>::infinity());
+        }
+
+        std::vector<size_t> reserve_indices(static_cast<size_t>(reserve_dof));
+        std::iota(reserve_indices.begin(), reserve_indices.end(), 0);
+        Eigen::VectorXd feasible_arm_start = Eigen::VectorXd::Zero(feasible_arm_dof);
+        feasible_arm_start.head(robot_description.joint_states.size()) = robot_description.joint_states;
+        Eigen::VectorXd feasible_arm_lower =
+            Eigen::VectorXd::Constant(feasible_arm_dof, -std::numeric_limits<double>::infinity());
+        Eigen::VectorXd feasible_arm_upper =
+            Eigen::VectorXd::Constant(feasible_arm_dof, std::numeric_limits<double>::infinity());
+        feasible_arm_lower.head(robot_description.joint_states.size()) = arm_lower;
+        feasible_arm_upper.head(robot_description.joint_states.size()) = arm_upper;
+
+        std::vector<size_t> arm_indices(static_cast<size_t>(feasible_arm_dof));
+        std::iota(arm_indices.begin(), arm_indices.end(), static_cast<size_t>(reserve_dof));
+        ccAffordancePlannerInverse_.configure_reserve_mobility(
+            reserve_mobility, feasible_arm_start, feasible_arm_lower, feasible_arm_upper, reserve_indices, arm_indices);
+    }
+    else
+    {
+        ccAffordancePlannerInverse_.disable_reserve_mobility();
+    }
 
     // Extract task description
     // Affordance info -- handle if asked to get from FK
@@ -74,7 +155,7 @@ PlannerResult CcAffordancePlannerInterface::generate_joint_trajectory(
     // theta_sdf vector.
 
     // Extract additional task description
-    Eigen::Matrix4d canonical_pose;
+    Eigen::Matrix4d canonical_pose = task_description.goal.canonical_pose;
     if (task_description.motion_type == MotionType::APPROACH)
     {
         // Canonical pose -- handle if asked to get from FK
@@ -86,8 +167,11 @@ PlannerResult CcAffordancePlannerInterface::generate_joint_trajectory(
         }
 
         // Compose the closed-chain model screws and determine the limit for the approach screw
-        const affordance_util::CcModel cc_model =
-            affordance_util::compose_cc_model_slist(robot_description, aff, canonical_pose, task_description.approach_gamma, vir_screw_order);
+        const affordance_util::CcModel cc_model = reserve_mobility.enabled
+            ? affordance_util::compose_rm_cc_model_slist(robot_description, aff, canonical_pose, reserve_mobility,
+                                                         task_description.approach_gamma, vir_screw_order)
+            : affordance_util::compose_cc_model_slist(robot_description, aff, canonical_pose,
+                                                      task_description.approach_gamma, vir_screw_order);
 
         // Extract and construct the secondary joint goals
         nof_secondary_joints += 1; // add approach joint
@@ -100,14 +184,15 @@ PlannerResult CcAffordancePlannerInterface::generate_joint_trajectory(
         plannerResult = this->generate_specified_motion_joint_trajectory_(
             &CcAffordancePlanner::generate_approach_motion_joint_trajectory,
             &CcAffordancePlanner::generate_approach_motion_joint_trajectory, cc_model.slist, secondary_joint_goals,
-            nof_secondary_joints, task_description.trajectory_density);
+            nof_secondary_joints, task_description.trajectory_density, reserve_mobility.enabled);
     }
 
     else // task_description.motion_type == MotionType::AFFORDANCE
     {
         // Compose the closed-chain model screws
-        const Eigen::MatrixXd cc_slist =
-            affordance_util::compose_cc_model_slist(robot_description, aff, vir_screw_order);
+        const Eigen::MatrixXd cc_slist = reserve_mobility.enabled
+            ? affordance_util::compose_rm_cc_model_slist(robot_description, aff, reserve_mobility, vir_screw_order)
+            : affordance_util::compose_cc_model_slist(robot_description, aff, vir_screw_order);
 
         // Extract and construct the secondary joint goals
         const Eigen::VectorXd secondary_joint_goals =
@@ -119,7 +204,7 @@ PlannerResult CcAffordancePlannerInterface::generate_joint_trajectory(
         plannerResult = this->generate_specified_motion_joint_trajectory_(
             &CcAffordancePlanner::generate_affordance_motion_joint_trajectory,
             &CcAffordancePlanner::generate_affordance_motion_joint_trajectory, cc_slist, secondary_joint_goals,
-            nof_secondary_joints, task_description.trajectory_density);
+            nof_secondary_joints, task_description.trajectory_density, reserve_mobility.enabled);
     }
 
     std::vector<double> gripper_joint_trajectory;
@@ -137,12 +222,26 @@ PlannerResult CcAffordancePlannerInterface::generate_joint_trajectory(
     }
 
     // Convert the differential closed-chain joint trajectory to robot joint trajectory
+    if (reserve_mobility.enabled && !plannerResult.joint_trajectory.empty())
+    {
+        plannerResult.reserve_trajectory.insert(plannerResult.reserve_trajectory.begin(),
+                                                reserve_mobility.initial_state);
+        plannerResult.reserve_pose_trajectory.insert(
+            plannerResult.reserve_pose_trajectory.begin(),
+            affordance_util::FKinSpace(Eigen::Matrix4d::Identity(), reserve_mobility.slist,
+                                       reserve_mobility.initial_state));
+        plannerResult.residual_mobility_norm.insert(plannerResult.residual_mobility_norm.begin(), 0.0);
+        plannerResult.reserve_active.insert(plannerResult.reserve_active.begin(), false);
+        plannerResult.active_arm_dof_count.insert(plannerResult.active_arm_dof_count.begin(),
+                                                  static_cast<size_t>(feasible_arm_dof_for_diagnostics));
+    }
     this->convert_cc_traj_to_robot_traj_(
         plannerResult.joint_trajectory, robot_description.joint_states,
         gripper_joint_trajectory); // Will insert gripper_joint_trajectory if task description included a gripper goal
 
     // Record the task description used for planning
     plannerResult.task_description = task_description;
+    plannerResult.task_description.reserve_mobility = reserve_mobility;
     plannerResult.task_description.affordance_info = aff; // Update affordance info if obtained from FK
     plannerResult.task_description.goal.canonical_pose = canonical_pose; // Update canonical pose if obtained from FK
 
@@ -153,7 +252,8 @@ PlannerResult CcAffordancePlannerInterface::generate_joint_trajectory(
 PlannerResult CcAffordancePlannerInterface::generate_specified_motion_joint_trajectory_(
     const Gsmt &generate_specified_motion_joint_trajectory,
     const Gsmt_st &generate_specified_motion_joint_trajectory_st, const Eigen::MatrixXd &slist,
-    const Eigen::VectorXd &secondary_joint_goals, const size_t &nof_secondary_joints, const int &trajectory_density)
+    const Eigen::VectorXd &secondary_joint_goals, const size_t &nof_secondary_joints, const int &trajectory_density,
+    const bool reserve_mobility_enabled)
 
 {
     PlannerResult transposeResult; // Result from the transpose planner
@@ -166,6 +266,15 @@ PlannerResult CcAffordancePlannerInterface::generate_specified_motion_joint_traj
     // Construct inverse and transpose planner objects
     CcAffordancePlanner *ccAffordancePlannerInversePtr(&ccAffordancePlannerInverse_);
     CcAffordancePlanner *ccAffordancePlannerTransposePtr(&ccAffordancePlannerTranspose_);
+
+    if (reserve_mobility_enabled)
+    {
+        inverseResult = (ccAffordancePlannerInversePtr->*generate_specified_motion_joint_trajectory)(
+            slist, secondary_joint_goals, nof_secondary_joints, trajectory_density);
+        inverseResult.update_method = UpdateMethod::INVERSE;
+        inverseResult.update_trail += "rm-cca inverse";
+        return inverseResult;
+    }
 
     // If a specific update method is requested, run the planner using that
     if (planner_config_.update_method == UpdateMethod::INVERSE)
@@ -377,10 +486,83 @@ void CcAffordancePlannerInterface::validate_input_(const affordance_util::RobotD
             "Robot description: 'joint_states' size must match the number of columns in 'slist'.");
     }
 
+    const bool has_lower_limits = robot_description.joint_lower_limits.size() != 0;
+    const bool has_upper_limits = robot_description.joint_upper_limits.size() != 0;
+    if (has_lower_limits != has_upper_limits)
+    {
+        throw std::invalid_argument("Robot description: joint lower and upper limits must both be supplied or empty.");
+    }
+    if (has_lower_limits &&
+        (robot_description.joint_lower_limits.size() != robot_description.joint_states.size() ||
+         robot_description.joint_upper_limits.size() != robot_description.joint_states.size()))
+    {
+        throw std::invalid_argument("Robot description: joint-limit sizes must match the robot DOF.");
+    }
+    for (Eigen::Index i = 0; i < robot_description.joint_lower_limits.size(); ++i)
+    {
+        const double lower = robot_description.joint_lower_limits(i);
+        const double upper = robot_description.joint_upper_limits(i);
+        if (std::isnan(lower) || std::isnan(upper) || !(lower < upper))
+        {
+            throw std::invalid_argument("Robot description: every joint lower limit must be less than its upper limit.");
+        }
+        if (robot_description.joint_states(i) < lower || robot_description.joint_states(i) > upper)
+        {
+            throw std::invalid_argument("Robot description: a starting joint state lies outside its joint limits.");
+        }
+        if (task_description.reserve_mobility.enabled &&
+            !(lower + planner_config_.joint_limit_margin < upper - planner_config_.joint_limit_margin))
+        {
+            throw std::invalid_argument("Planner joint-limit margin leaves no safe interval for an arm joint.");
+        }
+    }
+
     if ((!std::isnan(task_description.goal.gripper)) && (std::isnan(robot_description.gripper_state)))
     {
         throw std::invalid_argument("Robot description: 'gripper_state' must be supplied and cannot be NaN when "
                                     "goal.gripper is specified in task description.");
+    }
+
+    const affordance_util::ReserveMobilityDescription &reserve = task_description.reserve_mobility;
+    if (reserve.enabled)
+    {
+        const Eigen::Index reserve_dof = reserve.slist.cols();
+        if (reserve.slist.rows() != 6 || reserve_dof == 0 || !reserve.slist.allFinite())
+        {
+            throw std::invalid_argument("Reserve mobility: 'slist' must be a finite 6 x n matrix with n > 0.");
+        }
+        if (reserve.initial_state.size() != reserve_dof || !reserve.initial_state.allFinite())
+        {
+            throw std::invalid_argument("Reserve mobility: 'initial_state' must be finite and match reserve DOF.");
+        }
+        const bool reserve_has_lower = reserve.lower_limits.size() != 0;
+        const bool reserve_has_upper = reserve.upper_limits.size() != 0;
+        if (reserve_has_lower != reserve_has_upper ||
+            (reserve_has_lower &&
+             (reserve.lower_limits.size() != reserve_dof || reserve.upper_limits.size() != reserve_dof)))
+        {
+            throw std::invalid_argument("Reserve mobility: lower/upper limits must both be empty or match reserve DOF.");
+        }
+        for (Eigen::Index i = 0; i < reserve.lower_limits.size(); ++i)
+        {
+            if (std::isnan(reserve.lower_limits(i)) || std::isnan(reserve.upper_limits(i)) ||
+                !(reserve.lower_limits(i) < reserve.upper_limits(i)) ||
+                reserve.initial_state(i) < reserve.lower_limits(i) || reserve.initial_state(i) > reserve.upper_limits(i))
+            {
+                throw std::invalid_argument("Reserve mobility: invalid limits or initial state outside limits.");
+            }
+        }
+        if (reserve.max_step.size() != 0 && reserve.max_step.size() != reserve_dof)
+        {
+            throw std::invalid_argument("Reserve mobility: 'max_step' must be empty or match reserve DOF.");
+        }
+        for (Eigen::Index i = 0; i < reserve.max_step.size(); ++i)
+        {
+            if (!(reserve.max_step(i) > 0.0))
+            {
+                throw std::invalid_argument("Reserve mobility: every max-step value must be positive.");
+            }
+        }
     }
     /* Validate task description */
 
@@ -433,6 +615,14 @@ void CcAffordancePlannerInterface::validate_input_(const affordance_util::RobotD
     {
 
         throw std::invalid_argument("Task description: 'trajectory_density' must be >= 2.");
+    }
+
+    const Eigen::Index virtual_dof = task_description.vir_screw_order == affordance_util::VirtualScrewOrder::NONE
+                                         ? 0
+                                         : affordance_util::get_vir_screw_axes(task_description.vir_screw_order).cols();
+    if (task_description.goal.ee_orientation.size() > virtual_dof)
+    {
+        throw std::invalid_argument("Task description: EE-orientation goals exceed the selected virtual-screw DOF.");
     }
 }
 

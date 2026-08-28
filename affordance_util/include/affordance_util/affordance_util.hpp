@@ -105,7 +105,10 @@ enum class VirtualScrewOrder
     XY,
     YZ,
     ZX,
-    NONE
+    NONE,
+    X,
+    Y,
+    Z
 };
 
 /**
@@ -124,7 +127,26 @@ struct RobotDescription
     Eigen::MatrixXd slist;
     Eigen::Matrix4d M = Eigen::Matrix4d::Constant(std::numeric_limits<double>::quiet_NaN());
     Eigen::VectorXd joint_states;
+    Eigen::VectorXd joint_lower_limits; // Optional absolute limits; empty means all joints are unbounded
+    Eigen::VectorXd joint_upper_limits; // Optional absolute limits; empty means all joints are unbounded
     double gripper_state = std::numeric_limits<double>::quiet_NaN();
+};
+
+/**
+ * @brief Describes generic reserve mobility prepended to a robot arm chain.
+ *
+ * Reserve coordinates are primary joints whose stationarity is a secondary null-space task.
+ * Unavoidable reserve motion remains when feasible arm mobility is exhausted. For a floating base, use
+ * make_floating_base_reserve_description(). Empty limit and max-step vectors mean unbounded.
+ */
+struct ReserveMobilityDescription
+{
+    bool enabled = false;          ///< Enables RM-CCA when set on TaskDescription.
+    Eigen::MatrixXd slist;         ///< Reserve space screws, one 6D screw per column.
+    Eigen::VectorXd initial_state; ///< Initial reserve generalized coordinates.
+    Eigen::VectorXd lower_limits;  ///< Optional reserve coordinate lower limits.
+    Eigen::VectorXd upper_limits;  ///< Optional reserve coordinate upper limits.
+    Eigen::VectorXd max_step;      ///< Optional positive per-iteration numerical step limits.
 };
 
 /**
@@ -179,8 +201,8 @@ struct JointData
 
     struct Limits
     {
-        double lower;
-        double upper;
+        double lower = -std::numeric_limits<double>::infinity();
+        double upper = std::numeric_limits<double>::infinity();
     };
     std::string name;
     ScrewInfo screw_info;
@@ -206,7 +228,10 @@ inline const Eigen::MatrixXd &get_vir_screw_axes(VirtualScrewOrder order)
         {VirtualScrewOrder::ZXY, (Eigen::MatrixXd(3, 3) << 0, 1, 0, 0, 0, 1, 1, 0, 0).finished()},
         {VirtualScrewOrder::XY, (Eigen::MatrixXd(3, 2) << 1, 0, 0, 1, 0, 0).finished()},
         {VirtualScrewOrder::YZ, (Eigen::MatrixXd(3, 2) << 0, 1, 1, 0, 0, 0).finished()},
-        {VirtualScrewOrder::ZX, (Eigen::MatrixXd(3, 2) << 0, 0, 1, 0, 1, 0).finished()}};
+        {VirtualScrewOrder::ZX, (Eigen::MatrixXd(3, 2) << 0, 0, 1, 0, 1, 0).finished()},
+        {VirtualScrewOrder::X, (Eigen::MatrixXd(3, 1) << 1, 0, 0).finished()},
+        {VirtualScrewOrder::Y, (Eigen::MatrixXd(3, 1) << 0, 1, 0).finished()},
+        {VirtualScrewOrder::Z, (Eigen::MatrixXd(3, 1) << 0, 0, 1).finished()}};
 
     return vir_screw_order_map.at(order);
 }
@@ -232,6 +257,8 @@ struct RobotConfig
 
     Eigen::MatrixXd Slist;             // Space-form screw axes
     Eigen::Matrix4d M;                 // EE homogenous transformation matrix
+    Eigen::VectorXd joint_lower_limits; // Lower limits matching Slist columns
+    Eigen::VectorXd joint_upper_limits; // Upper limits matching Slist columns
     JointNames joint_names;            // Joint names
     FrameNames frame_names;            // Frame names
     Eigen::Vector3d ee_to_tool_offset; // Location of the tool from the EE
@@ -292,6 +319,40 @@ CcModel compose_cc_model_slist(const RobotDescription &robot_description, const 
  */
 Eigen::MatrixXd compose_cc_model_slist(const RobotDescription &robot_description, const ScrewInfo &aff_info,
                                        const VirtualScrewOrder &vir_screw_order = VirtualScrewOrder::XYZ);
+
+/**
+ * @brief Composes an approach closed-chain model with reserve screws before the robot arm screws.
+ *
+ * The returned order is reserve, arm, virtual EE, approach, affordance. The legacy
+ * compose_cc_model_slist() API and ordering are unchanged.
+ */
+CcModel compose_rm_cc_model_slist(const RobotDescription &robot_description, const ScrewInfo &aff_info,
+                                  const Eigen::MatrixXd &approach_end_pose,
+                                  const ReserveMobilityDescription &reserve_mobility,
+                                  const double approach_gamma = 1.0,
+                                  const VirtualScrewOrder &vir_screw_order = VirtualScrewOrder::XYZ);
+
+/**
+ * @brief Composes an affordance closed-chain model with reserve screws before the robot arm screws.
+ *
+ * The returned order is reserve, arm, virtual EE, affordance.
+ */
+Eigen::MatrixXd compose_rm_cc_model_slist(const RobotDescription &robot_description, const ScrewInfo &aff_info,
+                                          const ReserveMobilityDescription &reserve_mobility,
+                                          const VirtualScrewOrder &vir_screw_order = VirtualScrewOrder::XYZ);
+
+/**
+ * @brief Creates six virtual floating-base screws ordered Px, Py, Pz, Rx, Ry, Rz.
+ *
+ * @param initial_base_pose Pose of the initial floating-base frame in the space frame. Its axes and origin define the
+ * virtual screws; the returned generalized initial state is zero.
+ * @param translation_max_step Optional per-iteration translation limit. Infinity disables limiting.
+ * @param rotation_max_step Optional per-iteration rotation limit. Infinity disables limiting.
+ */
+ReserveMobilityDescription make_floating_base_reserve_description(
+    const Eigen::Matrix4d &initial_base_pose = Eigen::Matrix4d::Identity(),
+    double translation_max_step = std::numeric_limits<double>::infinity(),
+    double rotation_max_step = std::numeric_limits<double>::infinity());
 /**
  * @brief Given a urdf-type pose converts it to a homogeneous transformation matrix of Eigen::Matrix4d type.
  *
@@ -388,6 +449,17 @@ RobotConfig robot_builder(const std::string &config_file_path);
  * space-frame name, joint_names, and tool name
  */
 RobotConfig robot_builder(const std::string &urdf_string, const RobotConfig& robotConfig);
+
+/**
+ * @brief Converts builder output and a current joint state into a complete robot description, including limits.
+ *
+ * @param robot_config Robot model returned by robot_builder().
+ * @param joint_states Current arm joint states matching robot_config.Slist columns.
+ * @param gripper_state Optional current gripper state.
+ */
+RobotDescription make_robot_description(
+    const RobotConfig &robot_config, const Eigen::VectorXd &joint_states,
+    double gripper_state = std::numeric_limits<double>::quiet_NaN());
 
 /**
 * @brief Given a file path to a yaml file containing info needed to build robot from urdf, extracts that info into a RobotConfig struct

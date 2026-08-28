@@ -133,7 +133,7 @@ class CcAffordancePlannerInterface
         const Gsmt &generate_specified_motion_joint_trajectory,
         const Gsmt_st &generate_specified_motion_joint_trajectory_st, const Eigen::MatrixXd &slist,
         const Eigen::VectorXd &secondary_joint_goals, const size_t &nof_secondary_joints,
-        const int &trajectory_density);
+        const int &trajectory_density, bool reserve_mobility_enabled = false);
 
     /**
      * @brief Converts a differential joint trajectory into an absolute joint trajectory by referencing a starting joint

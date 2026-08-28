@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.12)
 project(affordance_util)
 
 # Specify C++ standard
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Set library output path
@@ -19,9 +19,16 @@ find_package(urdfdom REQUIRED)
 
 # Define the affordance_util library
 add_library(${PROJECT_NAME} STATIC src/${PROJECT_NAME}/${PROJECT_NAME}.cpp)
+add_library(affordance_util::affordance_util ALIAS ${PROJECT_NAME})
+set_target_properties(${PROJECT_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Link libraries against the affordance_util library and make them available to downstream packages
-target_link_libraries(${PROJECT_NAME} PUBLIC yaml-cpp urdfdom_model)
+if(TARGET urdfdom::urdfdom_model)
+    target_link_libraries(${PROJECT_NAME} PUBLIC yaml-cpp urdfdom::urdfdom_model urdfdom::urdf_parser)
+else()
+    target_include_directories(${PROJECT_NAME} PUBLIC ${urdfdom_INCLUDE_DIRS})
+    target_link_libraries(${PROJECT_NAME} PUBLIC yaml-cpp ${urdfdom_LIBRARIES})
+endif()
 
 # Add include directories with different paths for build and install contexts
 target_include_directories(${PROJECT_NAME} PUBLIC

@@ -11,6 +11,7 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <affordance_util/affordance_util.hpp>
+#include <cc_affordance_planner/rm_cca.hpp>
 #include <chrono>
 #include <optional>
 #include <vector>
@@ -57,7 +58,7 @@ struct Goal
 
     double affordance = std::numeric_limits<double>::quiet_NaN();
     Eigen::VectorXd ee_orientation;
-    Eigen::Matrix4d canonical_pose;
+    Eigen::Matrix4d canonical_pose = Eigen::Matrix4d::Constant(std::numeric_limits<double>::quiet_NaN());
     double gripper = std::numeric_limits<double>::quiet_NaN();
 };
 
@@ -78,6 +79,7 @@ struct TaskDescription
     EeOrientationConstraint ee_orientation_constraint = EeOrientationConstraint::DEFAULT;
     affordance_util::ScrewInfoFrom affordance_info_from; // Get affordance info from specified method
     affordance_util::PoseFrom canonical_pose_from; // Get canonical pose from specified method
+    affordance_util::ReserveMobilityDescription reserve_mobility; // Disabled by default; enables RM-CCA when true
 
     /**
      * @brief Given a planning type, constructs a cca task description with necessary parameters. This constructor is
@@ -125,13 +127,20 @@ enum class UpdateMethod
 struct PlannerResult
 {
     bool success = false;
-    TrajectoryDescription trajectory_description;
+    TrajectoryDescription trajectory_description = TrajectoryDescription::UNSET;
     std::vector<Eigen::VectorXd> joint_trajectory;
-    std::chrono::microseconds planning_time;
-    UpdateMethod update_method;
+    std::chrono::microseconds planning_time{0};
+    UpdateMethod update_method = UpdateMethod::INVERSE;
     std::string update_trail = "";
     bool includes_gripper_trajectory = false;
     TaskDescription task_description;
+    bool reserve_mobility_used = false;                       ///< True if the hierarchy retained reserve motion.
+    size_t reserve_activation_count = 0;                      ///< Number of inactive-to-active trajectory transitions.
+    std::vector<Eigen::VectorXd> reserve_trajectory;          ///< Reserve generalized state, separate from arm joints.
+    std::vector<Eigen::Matrix4d> reserve_pose_trajectory;     ///< Product-of-exponentials reserve pose trajectory.
+    std::vector<double> residual_mobility_norm;               ///< Maximum reserve correction norm per point solve.
+    std::vector<bool> reserve_active;                         ///< Whether reserve was used at each trajectory point.
+    std::vector<size_t> active_arm_dof_count;                 ///< Minimum feasible non-reserve DOF per point solve.
 };
 
 /**
@@ -146,6 +155,10 @@ struct PlannerConfig
     double closure_err_threshold_lin = 1e-5;
     int ik_max_itr = 200;
     UpdateMethod update_method = UpdateMethod::BEST;
+    double svd_relative_tolerance = 1e-8;       ///< Relative singular-value cutoff used by RM-CCA.
+    double residual_mobility_tolerance = 1e-10; ///< Threshold for classifying a reserve correction as active.
+    double joint_limit_margin = 1e-6;           ///< Inward margin applied to absolute arm joint limits.
+    double joint_limit_tolerance = 1e-10;       ///< Numerical tolerance for active-set boundary detection.
 };
 
 /**
@@ -156,6 +169,26 @@ class CcAffordancePlanner
   public:
     // Constructor
     explicit CcAffordancePlanner(const PlannerConfig &plannerConfig = PlannerConfig());
+
+    /**
+     * @brief Enables strict CCA-first/base-stationarity Newton updates with an explicit primary partition.
+     *
+     * @param reserve_mobility Generic reserve description used for limits, step limiting, and pose diagnostics.
+     * @param arm_start_absolute Absolute arm state corresponding to zero arm differential state.
+     * @param arm_lower_limits Absolute arm lower limits.
+     * @param arm_upper_limits Absolute arm upper limits.
+     * @param reserve_primary_indices Reserve columns in the primary part of the closed-chain model.
+     * @param arm_primary_indices Arm columns in the primary part of the closed-chain model.
+     */
+    void configure_reserve_mobility(const affordance_util::ReserveMobilityDescription &reserve_mobility,
+                                    const Eigen::VectorXd &arm_start_absolute,
+                                    const Eigen::VectorXd &arm_lower_limits,
+                                    const Eigen::VectorXd &arm_upper_limits,
+                                    const std::vector<size_t> &reserve_primary_indices,
+                                    const std::vector<size_t> &arm_primary_indices);
+
+    /** @brief Disables RM-CCA and restores the legacy fixed-base solver path. */
+    void disable_reserve_mobility();
 
     // Methods
     /**
@@ -295,14 +328,41 @@ class CcAffordancePlanner
     constexpr static double goal_min_ = 1e-5; // minimum magnitude to clamp secondary goals to avoid numerical issues
 
   private:
+    struct RmIkDiagnostics
+    {
+        bool reserve_active = false;
+        double residual_norm = 0.0;
+        size_t active_arm_dof_count = 0;
+    };
+
     //--Planner config parameters
     double accuracy_; // accuracy of the secondary goals
     double eps_rw_;   // closure error threshold for angular part
     double eps_rv_;   // closure error threshold for linear part
     int max_itr_l_;   // max interations for IK solver
+    double svd_relative_tolerance_;
+    double residual_mobility_tolerance_;
+    double joint_limit_margin_;
+    double joint_limit_tolerance_;
     //--EOF Planner config parameters
     constexpr static size_t twist_length_ = 6; // length of a twist vector
     Eigen::VectorXd theta_s_tol_;              // IK tolerance for secondary joint goal vector
+    bool reserve_mobility_enabled_ = false;
+    affordance_util::ReserveMobilityDescription reserve_mobility_;
+    Eigen::VectorXd arm_start_absolute_;
+    Eigen::VectorXd arm_lower_limits_;
+    Eigen::VectorXd arm_upper_limits_;
+    std::vector<size_t> reserve_primary_indices_;
+    std::vector<size_t> arm_primary_indices_;
+    RmIkDiagnostics last_rm_ik_diagnostics_;
+
+    std::optional<Eigen::VectorXd> call_rm_cc_ik_solver(const Eigen::MatrixXd &slist,
+                                                        const Eigen::VectorXd &theta_pg,
+                                                        const Eigen::VectorXd &theta_sg,
+                                                        const Eigen::VectorXd &theta_sd,
+                                                        std::stop_token st);
+    Eigen::VectorXd make_primary_start_guess() const;
+    void append_trajectory_point(PlannerResult &result, const Eigen::VectorXd &closed_chain_point) const;
 
     /**
      * @brief Given a list of closed-chain screw axes, primary and secondary network matrices, and primary and secondary

@@ -208,6 +208,91 @@ Eigen::MatrixXd compose_cc_model_slist(const RobotDescription &robot_description
     return slist;
 }
 
+namespace
+{
+void validate_reserve_description_for_composition(const ReserveMobilityDescription &reserve_mobility)
+{
+    if (!reserve_mobility.enabled)
+    {
+        throw std::invalid_argument("Reserve mobility must be enabled when composing an RM-CCA model.");
+    }
+    if (reserve_mobility.slist.rows() != 6 || reserve_mobility.slist.cols() == 0)
+    {
+        throw std::invalid_argument("Reserve mobility 'slist' must have shape 6 x n with n > 0.");
+    }
+    if (reserve_mobility.initial_state.size() != reserve_mobility.slist.cols())
+    {
+        throw std::invalid_argument("Reserve mobility 'initial_state' size must match 'slist' columns.");
+    }
+}
+} // namespace
+
+CcModel compose_rm_cc_model_slist(const RobotDescription &robot_description, const ScrewInfo &aff_info,
+                                  const Eigen::MatrixXd &approach_end_pose,
+                                  const ReserveMobilityDescription &reserve_mobility, const double approach_gamma,
+                                  const VirtualScrewOrder &vir_screw_order)
+{
+    validate_reserve_description_for_composition(reserve_mobility);
+    CcModel cc_model =
+        compose_cc_model_slist(robot_description, aff_info, approach_end_pose, approach_gamma, vir_screw_order);
+    Eigen::MatrixXd rm_slist(6, reserve_mobility.slist.cols() + cc_model.slist.cols());
+    rm_slist << reserve_mobility.slist, cc_model.slist;
+    cc_model.slist = std::move(rm_slist);
+    return cc_model;
+}
+
+Eigen::MatrixXd compose_rm_cc_model_slist(const RobotDescription &robot_description, const ScrewInfo &aff_info,
+                                          const ReserveMobilityDescription &reserve_mobility,
+                                          const VirtualScrewOrder &vir_screw_order)
+{
+    validate_reserve_description_for_composition(reserve_mobility);
+    const Eigen::MatrixXd cc_slist = compose_cc_model_slist(robot_description, aff_info, vir_screw_order);
+    Eigen::MatrixXd rm_slist(6, reserve_mobility.slist.cols() + cc_slist.cols());
+    rm_slist << reserve_mobility.slist, cc_slist;
+    return rm_slist;
+}
+
+ReserveMobilityDescription make_floating_base_reserve_description(const Eigen::Matrix4d &initial_base_pose,
+                                                                   const double translation_max_step,
+                                                                   const double rotation_max_step)
+{
+    if (!initial_base_pose.allFinite())
+    {
+        throw std::invalid_argument("Floating-base initial pose must contain only finite values.");
+    }
+    const Eigen::Matrix3d initial_rotation = initial_base_pose.block<3, 3>(0, 0);
+    if (!initial_rotation.isUnitary(1e-10) || std::abs(initial_rotation.determinant() - 1.0) > 1e-10 ||
+        !initial_base_pose.row(3).head(3).isZero(1e-10) || std::abs(initial_base_pose(3, 3) - 1.0) > 1e-10)
+    {
+        throw std::invalid_argument("Floating-base initial pose must be a valid SE(3) transform.");
+    }
+    if (!(translation_max_step > 0.0) || !(rotation_max_step > 0.0))
+    {
+        throw std::invalid_argument("Floating-base max steps must be positive.");
+    }
+
+    ReserveMobilityDescription description;
+    description.enabled = true;
+    description.slist.resize(6, 6);
+    const Eigen::Matrix3d rotation = initial_rotation;
+    const Eigen::Vector3d origin = initial_base_pose.block<3, 1>(0, 3);
+
+    for (Eigen::Index i = 0; i < 3; ++i)
+    {
+        const Eigen::Vector3d axis = rotation.col(i);
+        description.slist.col(i) << Eigen::Vector3d::Zero(), axis;
+        description.slist.col(i + 3) << axis, -axis.cross(origin);
+    }
+
+    description.initial_state = Eigen::VectorXd::Zero(6);
+    description.lower_limits = Eigen::VectorXd::Constant(6, -std::numeric_limits<double>::infinity());
+    description.upper_limits = Eigen::VectorXd::Constant(6, std::numeric_limits<double>::infinity());
+    description.max_step.resize(6);
+    description.max_step << Eigen::Vector3d::Constant(translation_max_step),
+        Eigen::Vector3d::Constant(rotation_max_step);
+    return description;
+}
+
 Eigen::Matrix4d convert_urdf_pose_to_matrix(const urdf::Pose &pose)
 {
     Eigen::Matrix4d transform = Eigen::Matrix4d::Identity();
@@ -326,6 +411,19 @@ RobotConfig robot_builder(const std::string &config_file_path)
         joint.name = jointNode["name"].as<std::string>();
         joint.screw_info.axis = jointNode["w"].as<Eigen::Vector3d>();
         joint.screw_info.location = jointNode["q"].as<Eigen::Vector3d>();
+
+        const YAML::Node limits_node = jointNode["limits"];
+        const YAML::Node lower_node = limits_node ? limits_node["lower"] : jointNode["lower"];
+        const YAML::Node upper_node = limits_node ? limits_node["upper"] : jointNode["upper"];
+        if (static_cast<bool>(lower_node) != static_cast<bool>(upper_node))
+        {
+            throw std::runtime_error("YAML robot joint limits must provide both 'lower' and 'upper'.");
+        }
+        if (lower_node)
+        {
+            joint.limits.lower = lower_node.as<double>();
+            joint.limits.upper = upper_node.as<double>();
+        }
         jointsData.push_back(joint);
     }
 
@@ -349,6 +447,8 @@ RobotConfig robot_builder(const std::string &config_file_path)
     const size_t screwSize = 6;
     const size_t &totalNofJoints = jointsData.size();
     Eigen::MatrixXd Slist(screwSize, totalNofJoints);
+    robotConfig.joint_lower_limits.resize(totalNofJoints);
+    robotConfig.joint_upper_limits.resize(totalNofJoints);
 
     for (size_t i = 0; i < totalNofJoints; i++)
     {
@@ -357,6 +457,8 @@ RobotConfig robot_builder(const std::string &config_file_path)
         /* Start setting the output of the function */
         // Joint names
         robotConfig.joint_names.robot.push_back(joint.name);
+        robotConfig.joint_lower_limits(i) = joint.limits.lower;
+        robotConfig.joint_upper_limits(i) = joint.limits.upper;
     }
 
     /* Fill out the remaining members of the output and return it*/
@@ -384,6 +486,8 @@ RobotConfig robot_builder(const std::string &urdf_string, const RobotConfig& rob
     robot_config.joint_names.robot.clear();
     robot_config.Slist.setConstant(std::numeric_limits<double>::quiet_NaN());
     robot_config.M.setConstant(std::numeric_limits<double>::quiet_NaN());
+    robot_config.joint_lower_limits.resize(0);
+    robot_config.joint_upper_limits.resize(0);
 
 
     // Extract necessary info from robotConfig for readability
@@ -477,8 +581,20 @@ RobotConfig robot_builder(const std::string &urdf_string, const RobotConfig& rob
                 throw std::runtime_error("Kinematic chain contains a joint type not accounted for.");
             }
             joint.name = joint_node->name;
-            joint.limits.lower = joint_node->limits->lower;
-            joint.limits.upper = joint_node->limits->upper;
+            if (joint_node->type == urdf::Joint::CONTINUOUS)
+            {
+                joint.limits.lower = -std::numeric_limits<double>::infinity();
+                joint.limits.upper = std::numeric_limits<double>::infinity();
+            }
+            else
+            {
+                if (!joint_node->limits)
+                {
+                    throw std::runtime_error("Bounded URDF joint is missing a <limit> element.");
+                }
+                joint.limits.lower = joint_node->limits->lower;
+                joint.limits.upper = joint_node->limits->upper;
+            }
 
             Eigen::Vector3d joint_position = joint_pose_in_ref_frame.block<3, 1>(0, 3);
             joint.screw_info.location = joint_position;
@@ -498,12 +614,16 @@ RobotConfig robot_builder(const std::string &urdf_string, const RobotConfig& rob
     const size_t screw_size = 6;
     const size_t &total_no_of_joints = joints_data.size();
     Eigen::MatrixXd s_list(screw_size, total_no_of_joints);
+    robot_config.joint_lower_limits.resize(total_no_of_joints);
+    robot_config.joint_upper_limits.resize(total_no_of_joints);
 
     for (size_t i = 0; i < total_no_of_joints; i++)
     {
         const JointData &joint = joints_data[i];
         s_list.col(i) << affordance_util::get_screw(joint.screw_info);
         robot_config.joint_names.robot.push_back(joint.name);
+        robot_config.joint_lower_limits(i) = joint.limits.lower;
+        robot_config.joint_upper_limits(i) = joint.limits.upper;
     }
 
     /* Fill out the remaining members of the output and return it*/
@@ -519,6 +639,23 @@ RobotConfig robot_builder(const std::string &urdf_string, const RobotConfig& rob
     robot_config.M = M;
 
     return robot_config;
+}
+RobotDescription make_robot_description(const RobotConfig &robot_config, const Eigen::VectorXd &joint_states,
+                                         const double gripper_state)
+{
+    if (robot_config.Slist.cols() != joint_states.size())
+    {
+        throw std::invalid_argument("Joint states size must match RobotConfig Slist columns.");
+    }
+
+    RobotDescription description;
+    description.slist = robot_config.Slist;
+    description.M = robot_config.M;
+    description.joint_states = joint_states;
+    description.joint_lower_limits = robot_config.joint_lower_limits;
+    description.joint_upper_limits = robot_config.joint_upper_limits;
+    description.gripper_state = gripper_state;
+    return description;
 }
 RobotConfig extract_info_for_urdf_robot_builder(const std::string &config_file_path)
 {
