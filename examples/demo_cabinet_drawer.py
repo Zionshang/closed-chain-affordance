@@ -2,8 +2,7 @@
 
 Examples:
     python examples/demo_cabinet_drawer.py
-    python examples/demo_cabinet_drawer.py --diagnose-errors
-    python examples/demo_cabinet_drawer.py --visualize --diagnose-errors
+    python examples/demo_cabinet_drawer.py --visualize
 """
 
 from __future__ import annotations
@@ -31,27 +30,32 @@ TRAJECTORY_POINTS = 12
 POSE_IK_ITERATIONS = 100
 SEED = 7
 
-CABINET_POSITION = (0.70, 0.0, 0.20)
+CABINET_POSITION_LOWER = (0.65, -0.10, 0.15)
+CABINET_POSITION_UPPER = (0.75, 0.10, 0.25)
 CABINET_YAW = math.pi  # Turn the cabinet front toward the robot.
 # Values below come from drawer_joint_1 and its handle collision in cabinet.urdf.
 DRAWER_1_HANDLE_LOCAL = (0.161706, 0.149577, 0.198016)
 DRAWER_HANDLE_AXIS = (0.0, -1.0, 0.0)  # Local +Y after the cabinet placement yaw.
 # drawer_joint_1 opens toward its negative limit, hence the extra minus sign.
 DRAWER_PULL_AXIS = (-0.999816, -0.018917, -0.003302)
-DRAWER_PULL_RANGE = (0.12, 0.18)
+# drawer_joint_1 opens in the negative joint direction; this is its full travel.
+DRAWER_MAX_PULL_DISTANCE = 0.22
 GRASP_ROLL = -math.pi / 2
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--visualize", action="store_true")
-    parser.add_argument("--diagnose-errors", action="store_true")
     return parser.parse_args()
 
 
 def print_quantiles(name: str, values: torch.Tensor) -> None:
+    values = values[torch.isfinite(values)]
+    if values.numel() == 0:
+        print(f"{name}: no finite samples in this group")
+        return
     quantiles = torch.quantile(
-        values[torch.isfinite(values)],
+        values,
         values.new_tensor((0.5, 0.9, 0.99, 1.0)),
     )
     print(
@@ -62,12 +66,12 @@ def print_quantiles(name: str, values: torch.Tensor) -> None:
 
 def cabinet_point(
     local_point: tuple[float, float, float],
-) -> tuple[float, float, float]:
+    cabinet_positions: torch.Tensor,
+) -> torch.Tensor:
     """Map a cabinet-local point to world after the 180-degree placement yaw."""
-    return (
-        CABINET_POSITION[0] - local_point[0],
-        CABINET_POSITION[1] - local_point[1],
-        CABINET_POSITION[2] + local_point[2],
+    yaw_pi_signs = cabinet_positions.new_tensor((-1.0, -1.0, 1.0))
+    return cabinet_positions + yaw_pi_signs * cabinet_positions.new_tensor(
+        local_point
     )
 
 
@@ -92,15 +96,18 @@ def main() -> None:
     )
 
     random = torch.Generator(device=DEVICE).manual_seed(SEED)
-    pull_samples = torch.rand(NUM_ENVIRONMENTS, generator=random, device=DEVICE)
-    cabinet_positions = torch.tensor(CABINET_POSITION, device=DEVICE).expand(
-        NUM_ENVIRONMENTS, -1
-    ).clone()
-    handle_positions = torch.tensor(
-        cabinet_point(DRAWER_1_HANDLE_LOCAL), device=DEVICE
-    ).expand(NUM_ENVIRONMENTS, -1).clone()
-    low_pull, high_pull = DRAWER_PULL_RANGE
-    pull_distances = low_pull + (high_pull - low_pull) * pull_samples
+    position_samples = torch.rand(
+        (NUM_ENVIRONMENTS, 3), generator=random, device=DEVICE
+    )
+    position_lower = torch.tensor(CABINET_POSITION_LOWER, device=DEVICE)
+    position_upper = torch.tensor(CABINET_POSITION_UPPER, device=DEVICE)
+    cabinet_positions = position_lower + (
+        position_upper - position_lower
+    ) * position_samples
+    handle_positions = cabinet_point(DRAWER_1_HANDLE_LOCAL, cabinet_positions)
+    pull_distances = torch.full(
+        (NUM_ENVIRONMENTS,), DRAWER_MAX_PULL_DISTANCE, device=DEVICE
+    )
     pull_axes = torch.tensor(DRAWER_PULL_AXIS, device=DEVICE).expand(
         NUM_ENVIRONMENTS, -1
     )
@@ -154,33 +161,31 @@ def main() -> None:
     print(
         f"cabinet drawer 1: {planning_time:.3f}s; "
         f"start IK {int(ik_success.sum())}/{NUM_ENVIRONMENTS}; "
-        f"drawer CCA {int(drawer.full_success.sum())}/{NUM_ENVIRONMENTS}; "
+        f"drawer CCA {int(success.sum())}/{int(ik_success.sum())}; "
         f"full {int(success.sum())}/{NUM_ENVIRONMENTS}"
     )
 
-    score = None
-    if args.diagnose_errors:
-        ee_poses = cca.fkin_space(robot.M, robot.slist, trajectory)
-        start_error = torch.linalg.vector_norm(
-            ee_poses[:, 0, :3, 3] - handle_positions, dim=-1
-        )
-        expected_final = handle_positions + pull_distances[:, None] * pull_axes
-        final_error = torch.linalg.vector_norm(
-            ee_poses[:, -1, :3, 3] - expected_final, dim=-1
-        )
-        print_quantiles("start handle error [m]", start_error)
-        print_quantiles("drawer 1 endpoint error [m]", final_error)
-        score = torch.maximum(start_error, final_error)
+    ee_poses = cca.fkin_space(robot.M, robot.slist, trajectory)
+    start_error = torch.linalg.vector_norm(
+        ee_poses[:, 0, :3, 3] - handle_positions, dim=-1
+    )
+    expected_final = handle_positions + pull_distances[:, None] * pull_axes
+    final_error = torch.linalg.vector_norm(
+        ee_poses[:, -1, :3, 3] - expected_final, dim=-1
+    )
+    print_quantiles("successful start handle error [m]", start_error[success])
+    print_quantiles("failed start handle error [m]", start_error[~success])
+    print_quantiles(
+        "successful drawer 1 endpoint error [m]", final_error[success]
+    )
+    print_quantiles("failed drawer 1 endpoint error [m]", final_error[~success])
+    score = torch.maximum(start_error, final_error)
 
     if args.visualize:
         from visualizer import ViserVisualizer, VisualizationConfig
 
         count = min(VISUALIZE_COUNT, NUM_ENVIRONMENTS)
-        shown = (
-            torch.arange(count, device=DEVICE)
-            if score is None
-            else torch.topk(score, count).indices
-        )
+        shown = torch.topk(score, count).indices
         ViserVisualizer(
             robot, URDF, config=VisualizationConfig(port=8081)
         ).show_cabinet_drawer_1(
