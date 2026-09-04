@@ -266,7 +266,10 @@
     <link name="tcp">
     </link>
     <joint name="tcp_joint" type="fixed">
-        <origin xyz="0 0 0.13" rpy="0 -1.5707963 0" />
+        <!-- Match the MuJoCo piper_l_tcp and the midpoint of the two inner
+             finger sites.  Planning to this frame now places the grasped
+             affordance point in the physical gripper plane. -->
+        <origin xyz="0 0 0.11" rpy="0 -1.5707963 0" />
         <parent link="gripper_base" />
         <child link="tcp" />
     </joint>

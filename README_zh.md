@@ -124,6 +124,8 @@ CCA 始终使用 inverse 更新，并在接近奇异时根据条件数自动切�
   cabinet 的竖直 door 把手，允许绕把手轴转动，再绕铰链打开门。
 - [`examples/demo_cabinet_drawer.py`](examples/demo_cabinet_drawer.py)：Piper 抓住
   drawer 1 的水平把手，允许绕把手轴转动，再沿滑轨拉开抽屉。
+- [`examples/demo_valve.py`](examples/demo_valve.py)：Piper 抓取随机位置的阀门
+  轮缘顶部，并沿旋转螺旋完成半圈转动。
 
 每个脚本都独立包含完整的最小规划流程；只有机器人网格、物体几何、轨迹着色和动画
 共用 [`ViserVisualizer`](examples/visualizer.py)。
@@ -131,9 +133,10 @@ CCA 始终使用 inverse 更新，并在接近奇异时根据条件数自动切�
 ```bash
 python examples/demo_cabinet_door.py
 python examples/demo_cabinet_drawer.py
+python examples/demo_valve.py
 ```
 
-先执行 `pip install -e ".[dev]"` 安装测试依赖，再运行两个默认 4096 环境的性能对比：
+先执行 `pip install -e ".[dev]"` 安装测试依赖，再运行三个默认 4096 环境的性能对比：
 
 ```bash
 pytest -s

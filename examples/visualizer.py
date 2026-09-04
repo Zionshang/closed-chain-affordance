@@ -167,6 +167,78 @@ class _CabinetUrdfScene:
         return update
 
 
+class _ValveScene:
+    """Draw and animate a primitive valve around its configured screw axis."""
+
+    def __init__(
+        self,
+        centres,
+        radii,
+        angles,
+        rotation_axis,
+        grasp_direction,
+        rim_points,
+        failed_color,
+    ):
+        self.centres = as_numpy(centres)
+        self.radii = as_numpy(radii)
+        self.angles = as_numpy(angles)
+        self.rotation_axis = np.asarray(rotation_axis, dtype=float)
+        self.grasp_direction = np.asarray(grasp_direction, dtype=float)
+        self.rim_points = rim_points
+        self.failed_color = failed_color
+
+    def __call__(self, server, offsets, success_mask, trajectory_steps):
+        axis = self.rotation_axis / np.linalg.norm(self.rotation_axis)
+        grasp = self.grasp_direction / np.linalg.norm(self.grasp_direction)
+        tangent = np.cross(axis, grasp)
+        tangent /= np.linalg.norm(tangent)
+        theta = np.linspace(0.0, 2.0 * np.pi, self.rim_points, endpoint=False)
+        handles = []
+        for index, (centre, radius) in enumerate(
+            zip(self.centres, self.radii, strict=True)
+        ):
+            rim = radius * (
+                np.cos(theta)[:, None] * grasp + np.sin(theta)[:, None] * tangent
+            )
+            spoke_directions = np.linspace(0.0, 2.0 * np.pi, 6, endpoint=False)
+            spokes = np.stack(
+                [
+                    np.zeros((6, 3)),
+                    radius
+                    * (
+                        np.cos(spoke_directions)[:, None] * grasp
+                        + np.sin(spoke_directions)[:, None] * tangent
+                    ),
+                ],
+                axis=1,
+            )
+            segments = np.concatenate(
+                [np.stack([rim, np.roll(rim, -1, axis=0)], axis=1), spokes],
+                axis=0,
+            )
+            color = (255, 160, 40) if success_mask[index] else self.failed_color
+            handles.append(
+                server.scene.add_line_segments(
+                    f"tasks/valve/{index}",
+                    points=segments,
+                    colors=color,
+                    line_width=3.0,
+                    position=centre + offsets[index],
+                )
+            )
+
+        def update(frame):
+            fraction = frame / max(trajectory_steps - 1, 1)
+            for handle, angle in zip(handles, self.angles, strict=True):
+                half_angle = 0.5 * angle * fraction
+                handle.wxyz = np.concatenate(
+                    [[np.cos(half_angle)], axis * np.sin(half_angle)]
+                )
+
+        return update
+
+
 def as_numpy(value) -> np.ndarray:
     if torch.is_tensor(value):
         return value.detach().cpu().numpy()
@@ -346,6 +418,37 @@ class ViserVisualizer:
                 axis_segments,
                 handle_positions,
                 handle_axis,
+                self.config.failed_color,
+            ),
+        )
+
+    def show_valve(
+        self,
+        joint_trajectory,
+        valid_mask,
+        success_mask,
+        centres,
+        radii,
+        angles,
+        *,
+        rotation_axis=(1.0, 0.0, 0.0),
+        grasp_direction=(0.0, 0.0, 1.0),
+        rim_points=48,
+    ):
+        """Visualize a valve affordance trajectory without an approach phase."""
+        steps = as_numpy(joint_trajectory).shape[1]
+        self.show(
+            joint_trajectory,
+            valid_mask,
+            success_mask,
+            [TrajectoryPhase("turn_valve", 0, steps, (255, 160, 40))],
+            task_scene=_ValveScene(
+                centres,
+                radii,
+                angles,
+                rotation_axis,
+                grasp_direction,
+                rim_points,
                 self.config.failed_color,
             ),
         )

@@ -112,6 +112,8 @@ canonical pose independently of trajectory-planning success.
 - [`examples/demo_cabinet_drawer.py`](examples/demo_cabinet_drawer.py): Piper
   grasps drawer 1's horizontal handle, remains free to roll about the handle,
   and pulls the drawer along its rail.
+- [`examples/demo_valve.py`](examples/demo_valve.py): Piper grasps the top of a
+  randomized valve rim and follows a half-turn rotational screw.
 
 Each script contains its complete minimal planning flow. Only the reusable
 [`ViserVisualizer`](examples/visualizer.py) is shared. Run them with:
@@ -119,9 +121,10 @@ Each script contains its complete minimal planning flow. Only the reusable
 ```bash
 python examples/demo_cabinet_door.py
 python examples/demo_cabinet_drawer.py
+python examples/demo_valve.py
 ```
 
-Install the development extra with `pip install -e ".[dev]"`, then run the two
+Install the development extra with `pip install -e ".[dev]"`, then run the three
 4096-environment timing comparisons with:
 
 ```bash
