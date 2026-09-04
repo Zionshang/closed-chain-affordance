@@ -223,6 +223,8 @@ task_description.reserve_mobility =
     );
 
 cc_affordance_planner::PlannerConfig config;
+config.enable_joint_limits = true;
+config.enable_nullspace_planning = true;
 config.svd_relative_tolerance = 1e-8;
 config.residual_mobility_tolerance = 1e-10;
 config.joint_limit_margin = 1e-6;
@@ -231,11 +233,21 @@ cc_affordance_planner::CcAffordancePlannerInterface planner(config);
 auto result = planner.generate_joint_trajectory(robot_description, task_description);
 ```
 
-When reserve mobility is enabled, the planner always uses its pseudoinverse path and does not start the transpose
-thread, even if `update_method` is `BEST`. `result.joint_trajectory` retains the arm/secondary layout used by the
-fixed-base interface, while `result.reserve_trajectory` and `result.reserve_pose_trajectory` contain the separate base
-trajectory. `reserve_active`, `residual_mobility_norm` (the maximum reserve correction norm used while solving that
-point), and `active_arm_dof_count` are aligned with those trajectory points.
+The two RM extensions can be switched independently. Both default to `true`, preserving the full RM-CCA behavior:
+
+| `enable_joint_limits` | `enable_nullspace_planning` | Behavior |
+|---|---|---|
+| `true` | `true` | Full bound-aware RM-CCA: arm first, reserve motion after feasible null-space exhaustion. |
+| `true` | `false` | Bound-aware whole-body pseudoinverse; no secondary base-stationarity objective. |
+| `false` | `true` | Null-space redistribution without absolute-coordinate bound enforcement. |
+| `false` | `false` | Exact legacy mode: the reserve chain is ignored and the original fixed-base CCA model, solver selection, and trajectory conversion paths are used. |
+
+Whenever at least one extension is enabled together with reserve mobility, the planner uses its pseudoinverse path and
+does not start the transpose thread, even if `update_method` is `BEST`. `result.joint_trajectory` retains the
+arm/secondary layout used by the fixed-base interface, while `result.reserve_trajectory` and
+`result.reserve_pose_trajectory` contain the separate base trajectory. In exact legacy mode these reserve outputs are
+empty. `reserve_active`, `residual_mobility_norm` (the maximum reserve correction norm used while solving that point),
+and `active_arm_dof_count` are aligned with the RM trajectory points.
 
 ##### Python bindings and cabinet Viser demos
 
@@ -262,20 +274,30 @@ cmake -S python -B python/build \
 cmake --build python/build --target cca_cpp --parallel
 ```
 
-Only the two migrated cabinet tasks are kept as executable Python examples. Run their pose-IK, RM-CCA, joint-limit,
-and endpoint assertions without a viewer:
+Only the two migrated cabinet tasks are kept as executable Python examples. Each command runs its pose-IK, RM-CCA,
+joint-limit, and endpoint assertions, then starts the real-mesh Viser viewer by default:
 
 ```bash
 python python/examples/demo_cabinet_drawer.py
 python python/examples/demo_cabinet_door.py
 ```
 
-Start either real-mesh Viser animation:
+Both switches are also available directly in either example through Python's paired boolean flags:
 
 ```bash
-python python/examples/demo_cabinet_drawer.py --visualize  # localhost:8081
-python python/examples/demo_cabinet_door.py --visualize    # localhost:8080
+# Full RM-CCA (both are on by default)
+python python/examples/demo_cabinet_drawer.py
+
+# Independent ablations
+python python/examples/demo_cabinet_drawer.py --no-nullspace-planning
+python python/examples/demo_cabinet_drawer.py --no-joint-limits
+
+# Original fixed-base closed-chain-affordance behavior
+python python/examples/demo_cabinet_drawer.py --no-joint-limits --no-nullspace-planning
 ```
+
+Drawer uses `localhost:8081` and door uses `localhost:8080`. Use `--port` to override the port or `--duration` to stop
+the viewer automatically after a specified number of seconds.
 
 Both tasks preserve the Piper-L, cabinet placement, handle/hinge definitions, and free virtual handle axis from the
 other project. The goals are deterministic: drawer pull is fixed at `0.15 m` and door opening is fixed at `-pi/2`

@@ -155,6 +155,8 @@ struct PlannerConfig
     double closure_err_threshold_lin = 1e-5;
     int ik_max_itr = 200;
     UpdateMethod update_method = UpdateMethod::BEST;
+    bool enable_joint_limits = true;          ///< Enforce RM-CCA primary-coordinate bounds with an active set.
+    bool enable_nullspace_planning = true;    ///< Prefer stationary reserve mobility in the CCA task null space.
     double svd_relative_tolerance = 1e-8;       ///< Relative singular-value cutoff used by RM-CCA.
     double residual_mobility_tolerance = 1e-10; ///< Threshold for classifying a reserve correction as active.
     double joint_limit_margin = 1e-6;           ///< Inward margin applied to absolute arm joint limits.
@@ -340,6 +342,8 @@ class CcAffordancePlanner
     double eps_rw_;   // closure error threshold for angular part
     double eps_rv_;   // closure error threshold for linear part
     int max_itr_l_;   // max interations for IK solver
+    bool enable_joint_limits_;
+    bool enable_nullspace_planning_;
     double svd_relative_tolerance_;
     double residual_mobility_tolerance_;
     double joint_limit_margin_;

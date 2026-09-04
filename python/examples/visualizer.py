@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from cabinet_demo_common import ARM_DOF, cca
+from cabinet_demo_common import ARM_DOF, base_pose_trajectory, cca
 
 
 @dataclass(frozen=True)
@@ -59,7 +59,7 @@ class CabinetVisualizer:
 
     def _world_tool_path(self, result: cca.PlannerResult, offset: np.ndarray):
         trajectory = np.asarray(result.joint_trajectory)
-        base_poses = np.asarray(result.reserve_pose_trajectory)
+        base_poses = base_pose_trajectory(result)
         return np.asarray(
             [
                 (
@@ -93,7 +93,7 @@ class CabinetVisualizer:
             raise ValueError("at least one trajectory case is required")
 
         trajectories = [np.asarray(case.result.joint_trajectory) for case in cases]
-        base_poses = [np.asarray(case.result.reserve_pose_trajectory) for case in cases]
+        base_poses = [base_pose_trajectory(case.result) for case in cases]
         for trajectory, poses in zip(trajectories, base_poses):
             if trajectory.ndim != 2 or poses.shape != (trajectory.shape[0], 4, 4):
                 raise ValueError("planner arm/base trajectories are not point-aligned")

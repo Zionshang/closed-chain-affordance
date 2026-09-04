@@ -38,8 +38,19 @@ FROZEN_BASE_HALF_RANGE = 1e-12
 
 def parse_args(description: str, default_port: int) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--port", type=int, default=default_port)
+    parser.add_argument(
+        "--joint-limits",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable/disable RM-CCA bound-aware joint-limit handling.",
+    )
+    parser.add_argument(
+        "--nullspace-planning",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable/disable reserve-stationarity null-space redistribution.",
+    )
     parser.add_argument(
         "--duration",
         type=float,
@@ -72,7 +83,11 @@ def load_piper() -> tuple[cca.RobotDescription, cca.RobotConfig]:
     return robot, robot_config
 
 
-def planner_config() -> cca.PlannerConfig:
+def planner_config(
+    *,
+    enable_joint_limits: bool = True,
+    enable_nullspace_planning: bool = True,
+) -> cca.PlannerConfig:
     config = cca.PlannerConfig()
     config.update_method = cca.UpdateMethod.BEST
     config.accuracy = 0.01
@@ -81,7 +96,19 @@ def planner_config() -> cca.PlannerConfig:
     config.closure_err_threshold_lin = 1e-4
     config.residual_mobility_tolerance = 1e-10
     config.joint_limit_margin = 1e-6
+    config.enable_joint_limits = enable_joint_limits
+    config.enable_nullspace_planning = enable_nullspace_planning
     return config
+
+
+def base_pose_trajectory(result: cca.PlannerResult) -> np.ndarray:
+    """Return aligned base poses, using identity for legacy fixed-base output."""
+    trajectory = np.asarray(result.joint_trajectory)
+    poses = np.asarray(result.reserve_pose_trajectory)
+    if poses.size == 0:
+        return np.repeat(np.eye(4)[None, :, :], trajectory.shape[0], axis=0)
+    assert poses.shape == (trajectory.shape[0], 4, 4)
+    return poses
 
 
 def solve_grasp(
@@ -142,6 +169,35 @@ def freeze_base_mobility(task: cca.TaskDescription) -> None:
     task.reserve_mobility = reserve
 
 
+def assert_configured_full_plan(
+    result: cca.PlannerResult,
+    grasp_joints: np.ndarray,
+    *,
+    enable_joint_limits: bool,
+    enable_nullspace_planning: bool,
+) -> np.ndarray:
+    """Check output invariants shared by the three non-default ablations."""
+    trajectory = np.asarray(result.joint_trajectory)
+    assert result.success
+    assert result.trajectory_description == cca.TrajectoryDescription.FULL
+    assert trajectory.shape == (TRAJECTORY_POINTS, ARM_DOF + 2)
+    assert bool(np.isfinite(trajectory).all())
+
+    if enable_joint_limits:
+        arm_motion = np.max(np.abs(trajectory[:, :ARM_DOF] - grasp_joints))
+        assert arm_motion <= ARM_SAFETY_HALF_RANGE + 1e-9
+
+    reserve = np.asarray(result.reserve_trajectory)
+    if not enable_joint_limits and not enable_nullspace_planning:
+        assert reserve.size == 0
+        assert len(result.reserve_pose_trajectory) == 0
+        assert not result.reserve_mobility_used
+    else:
+        assert reserve.shape == (TRAJECTORY_POINTS, 6)
+        assert bool(np.isfinite(reserve).all())
+    return trajectory
+
+
 def assert_arm_only_partial_plan(
     result: cca.PlannerResult, grasp_joints: np.ndarray
 ) -> np.ndarray:
@@ -192,7 +248,7 @@ def world_tool_positions(
     robot: cca.RobotDescription, result: cca.PlannerResult
 ) -> np.ndarray:
     trajectory = np.asarray(result.joint_trajectory)
-    base_poses = np.asarray(result.reserve_pose_trajectory)
+    base_poses = base_pose_trajectory(result)
     return np.asarray(
         [
             (

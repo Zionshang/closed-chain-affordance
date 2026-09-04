@@ -72,8 +72,13 @@ PlannerResult CcAffordancePlannerInterface::generate_joint_trajectory(
     PlannerResult plannerResult;
 
     affordance_util::ReserveMobilityDescription reserve_mobility = task_description.reserve_mobility;
+    // Disabling both RM extensions is an explicit compatibility mode. Ignore the attached reserve model entirely and
+    // use the same model composition, solver selection, and trajectory conversion as the original fixed-base CCA.
+    const bool rm_planning_enabled =
+        reserve_mobility.enabled &&
+        (planner_config_.enable_joint_limits || planner_config_.enable_nullspace_planning);
     Eigen::Index feasible_arm_dof_for_diagnostics = robot_description.joint_states.size();
-    if (reserve_mobility.enabled)
+    if (rm_planning_enabled)
     {
         const Eigen::Index reserve_dof = reserve_mobility.slist.cols();
         const Eigen::Index virtual_dof = task_description.vir_screw_order == affordance_util::VirtualScrewOrder::NONE
@@ -167,7 +172,7 @@ PlannerResult CcAffordancePlannerInterface::generate_joint_trajectory(
         }
 
         // Compose the closed-chain model screws and determine the limit for the approach screw
-        const affordance_util::CcModel cc_model = reserve_mobility.enabled
+        const affordance_util::CcModel cc_model = rm_planning_enabled
             ? affordance_util::compose_rm_cc_model_slist(robot_description, aff, canonical_pose, reserve_mobility,
                                                          task_description.approach_gamma, vir_screw_order)
             : affordance_util::compose_cc_model_slist(robot_description, aff, canonical_pose,
@@ -184,13 +189,13 @@ PlannerResult CcAffordancePlannerInterface::generate_joint_trajectory(
         plannerResult = this->generate_specified_motion_joint_trajectory_(
             &CcAffordancePlanner::generate_approach_motion_joint_trajectory,
             &CcAffordancePlanner::generate_approach_motion_joint_trajectory, cc_model.slist, secondary_joint_goals,
-            nof_secondary_joints, task_description.trajectory_density, reserve_mobility.enabled);
+            nof_secondary_joints, task_description.trajectory_density, rm_planning_enabled);
     }
 
     else // task_description.motion_type == MotionType::AFFORDANCE
     {
         // Compose the closed-chain model screws
-        const Eigen::MatrixXd cc_slist = reserve_mobility.enabled
+        const Eigen::MatrixXd cc_slist = rm_planning_enabled
             ? affordance_util::compose_rm_cc_model_slist(robot_description, aff, reserve_mobility, vir_screw_order)
             : affordance_util::compose_cc_model_slist(robot_description, aff, vir_screw_order);
 
@@ -204,7 +209,7 @@ PlannerResult CcAffordancePlannerInterface::generate_joint_trajectory(
         plannerResult = this->generate_specified_motion_joint_trajectory_(
             &CcAffordancePlanner::generate_affordance_motion_joint_trajectory,
             &CcAffordancePlanner::generate_affordance_motion_joint_trajectory, cc_slist, secondary_joint_goals,
-            nof_secondary_joints, task_description.trajectory_density, reserve_mobility.enabled);
+            nof_secondary_joints, task_description.trajectory_density, rm_planning_enabled);
     }
 
     std::vector<double> gripper_joint_trajectory;
@@ -222,7 +227,7 @@ PlannerResult CcAffordancePlannerInterface::generate_joint_trajectory(
     }
 
     // Convert the differential closed-chain joint trajectory to robot joint trajectory
-    if (reserve_mobility.enabled && !plannerResult.joint_trajectory.empty())
+    if (rm_planning_enabled && !plannerResult.joint_trajectory.empty())
     {
         plannerResult.reserve_trajectory.insert(plannerResult.reserve_trajectory.begin(),
                                                 reserve_mobility.initial_state);
@@ -272,7 +277,18 @@ PlannerResult CcAffordancePlannerInterface::generate_specified_motion_joint_traj
         inverseResult = (ccAffordancePlannerInversePtr->*generate_specified_motion_joint_trajectory)(
             slist, secondary_joint_goals, nof_secondary_joints, trajectory_density);
         inverseResult.update_method = UpdateMethod::INVERSE;
-        inverseResult.update_trail += "rm-cca inverse";
+        if (planner_config_.enable_joint_limits && planner_config_.enable_nullspace_planning)
+        {
+            inverseResult.update_trail += "rm-cca inverse";
+        }
+        else if (planner_config_.enable_joint_limits)
+        {
+            inverseResult.update_trail += "bound-aware whole-body inverse";
+        }
+        else
+        {
+            inverseResult.update_trail += "null-space rm-cca inverse (joint limits disabled)";
+        }
         return inverseResult;
     }
 
@@ -510,7 +526,7 @@ void CcAffordancePlannerInterface::validate_input_(const affordance_util::RobotD
         {
             throw std::invalid_argument("Robot description: a starting joint state lies outside its joint limits.");
         }
-        if (task_description.reserve_mobility.enabled &&
+        if (task_description.reserve_mobility.enabled && planner_config_.enable_joint_limits &&
             !(lower + planner_config_.joint_limit_margin < upper - planner_config_.joint_limit_margin))
         {
             throw std::invalid_argument("Planner joint-limit margin leaves no safe interval for an arm joint.");
@@ -524,7 +540,10 @@ void CcAffordancePlannerInterface::validate_input_(const affordance_util::RobotD
     }
 
     const affordance_util::ReserveMobilityDescription &reserve = task_description.reserve_mobility;
-    if (reserve.enabled)
+    const bool rm_planning_enabled =
+        reserve.enabled &&
+        (planner_config_.enable_joint_limits || planner_config_.enable_nullspace_planning);
+    if (rm_planning_enabled)
     {
         const Eigen::Index reserve_dof = reserve.slist.cols();
         if (reserve.slist.rows() != 6 || reserve_dof == 0 || !reserve.slist.allFinite())

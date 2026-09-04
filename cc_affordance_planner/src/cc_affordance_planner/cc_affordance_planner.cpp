@@ -91,6 +91,8 @@ CcAffordancePlanner::CcAffordancePlanner(const PlannerConfig &plannerConfig)
       eps_rw_(plannerConfig.closure_err_threshold_ang),
       eps_rv_(plannerConfig.closure_err_threshold_lin),
       max_itr_l_(plannerConfig.ik_max_itr),
+      enable_joint_limits_(plannerConfig.enable_joint_limits),
+      enable_nullspace_planning_(plannerConfig.enable_nullspace_planning),
       svd_relative_tolerance_(plannerConfig.svd_relative_tolerance),
       residual_mobility_tolerance_(plannerConfig.residual_mobility_tolerance),
       joint_limit_margin_(plannerConfig.joint_limit_margin),
@@ -842,24 +844,31 @@ std::optional<Eigen::VectorXd> CcAffordancePlanner::call_rm_cc_ik_solver(
         Eigen::VectorXd::Constant(static_cast<Eigen::Index>(nof_pjoints_), -std::numeric_limits<double>::infinity());
     Eigen::VectorXd primary_upper =
         Eigen::VectorXd::Constant(static_cast<Eigen::Index>(nof_pjoints_), std::numeric_limits<double>::infinity());
-    for (size_t i = 0; i < reserve_primary_indices_.size(); ++i)
+    if (enable_joint_limits_)
     {
-        const Eigen::Index primary_index = static_cast<Eigen::Index>(reserve_primary_indices_[i]);
-        primary_lower(primary_index) = reserve_mobility_.lower_limits(static_cast<Eigen::Index>(i));
-        primary_upper(primary_index) = reserve_mobility_.upper_limits(static_cast<Eigen::Index>(i));
+        for (size_t i = 0; i < reserve_primary_indices_.size(); ++i)
+        {
+            const Eigen::Index primary_index = static_cast<Eigen::Index>(reserve_primary_indices_[i]);
+            primary_lower(primary_index) = reserve_mobility_.lower_limits(static_cast<Eigen::Index>(i));
+            primary_upper(primary_index) = reserve_mobility_.upper_limits(static_cast<Eigen::Index>(i));
+        }
+        for (size_t i = 0; i < arm_primary_indices_.size(); ++i)
+        {
+            const Eigen::Index primary_index = static_cast<Eigen::Index>(arm_primary_indices_[i]);
+            // The safe interval normally excludes a small margin. If a supplied start state is already inside that
+            // margin, keep the start itself admissible so the joint can move back toward the interior.
+            primary_lower(primary_index) =
+                std::min(0.0, arm_lower_limits_(static_cast<Eigen::Index>(i)) + joint_limit_margin_ -
+                                  arm_start_absolute_(static_cast<Eigen::Index>(i)));
+            primary_upper(primary_index) =
+                std::max(0.0, arm_upper_limits_(static_cast<Eigen::Index>(i)) - joint_limit_margin_ -
+                                  arm_start_absolute_(static_cast<Eigen::Index>(i)));
+        }
     }
-    for (size_t i = 0; i < arm_primary_indices_.size(); ++i)
-    {
-        const Eigen::Index primary_index = static_cast<Eigen::Index>(arm_primary_indices_[i]);
-        // The safe interval normally excludes a small margin. If a supplied start state is already inside that
-        // margin, keep the start itself admissible so the joint can move back toward the interior.
-        primary_lower(primary_index) =
-            std::min(0.0, arm_lower_limits_(static_cast<Eigen::Index>(i)) + joint_limit_margin_ -
-                              arm_start_absolute_(static_cast<Eigen::Index>(i)));
-        primary_upper(primary_index) =
-            std::max(0.0, arm_upper_limits_(static_cast<Eigen::Index>(i)) - joint_limit_margin_ -
-                              arm_start_absolute_(static_cast<Eigen::Index>(i)));
-    }
+
+    const std::vector<size_t> no_reserve_stationarity;
+    const std::vector<size_t> &stationary_reserve_indices =
+        enable_nullspace_planning_ ? reserve_primary_indices_ : no_reserve_stationarity;
 
     auto reserve_values = [&](const Eigen::VectorXd &primary) {
         Eigen::VectorXd values(static_cast<Eigen::Index>(reserve_primary_indices_.size()));
@@ -916,7 +925,7 @@ std::optional<Eigen::VectorXd> CcAffordancePlanner::call_rm_cc_ik_solver(
         // Primary task: the original CCA Newton correction. Secondary task: eliminate base motion through the
         // feasible primary-task null space. Boundary variables are frozen only inside this active-set solve.
         FeasibleNullSpaceStep task_step = compute_feasible_nullspace_step(
-            Jc, task_error, theta_p, primary_lower, primary_upper, arm_primary_indices_, reserve_primary_indices_,
+            Jc, task_error, theta_p, primary_lower, primary_upper, arm_primary_indices_, stationary_reserve_indices,
             svd_relative_tolerance_, joint_limit_tolerance_);
         Eigen::VectorXd primary_delta = task_step.delta;
         limit_reserve_increment(primary_delta,
@@ -953,7 +962,7 @@ std::optional<Eigen::VectorXd> CcAffordancePlanner::call_rm_cc_ik_solver(
         closure_task_error << closure_error, Eigen::VectorXd::Zero(theta_s.size());
         FeasibleNullSpaceStep closure_step = compute_feasible_nullspace_step(
             closure_jacobian, closure_task_error, closure_state, closure_lower, closure_upper, arm_primary_indices_,
-            reserve_primary_indices_, svd_relative_tolerance_, joint_limit_tolerance_);
+            stationary_reserve_indices, svd_relative_tolerance_, joint_limit_tolerance_);
         Eigen::VectorXd closure_delta = closure_step.delta;
         Eigen::VectorXd task_reserve_use(static_cast<Eigen::Index>(reserve_primary_indices_.size()));
         for (size_t i = 0; i < reserve_primary_indices_.size(); ++i)

@@ -215,6 +215,70 @@ cc_affordance_planner::TaskDescription make_rotation_task(const affordance_util:
     return task;
 }
 
+void test_disabled_extensions_are_exactly_legacy_cca()
+{
+    const auto robot = make_kinova_description();
+    const auto rm_task = make_rotation_task(robot, 0.02, 3);
+    auto legacy_task = rm_task;
+    legacy_task.reserve_mobility.enabled = false;
+
+    cc_affordance_planner::PlannerConfig config;
+    config.update_method = cc_affordance_planner::UpdateMethod::INVERSE;
+    config.enable_joint_limits = false;
+    config.enable_nullspace_planning = false;
+
+    const auto legacy =
+        cc_affordance_planner::CcAffordancePlannerInterface(config).generate_joint_trajectory(robot, legacy_task);
+    const auto compatibility =
+        cc_affordance_planner::CcAffordancePlannerInterface(config).generate_joint_trajectory(robot, rm_task);
+
+    require(legacy.success == compatibility.success &&
+                legacy.trajectory_description == compatibility.trajectory_description &&
+                legacy.update_method == compatibility.update_method && legacy.update_trail == compatibility.update_trail,
+            "Compatibility-switch test: planner status differs from fixed-base legacy CCA.");
+    require(legacy.joint_trajectory.size() == compatibility.joint_trajectory.size(),
+            "Compatibility-switch test: trajectory length differs from fixed-base legacy CCA.");
+    for (size_t i = 0; i < legacy.joint_trajectory.size(); ++i)
+    {
+        require((legacy.joint_trajectory[i].array() == compatibility.joint_trajectory[i].array()).all(),
+                "Compatibility-switch test: trajectory is not bit-identical to fixed-base legacy CCA.");
+    }
+    require(compatibility.reserve_trajectory.empty() && compatibility.reserve_pose_trajectory.empty() &&
+                compatibility.reserve_active.empty() && !compatibility.reserve_mobility_used,
+            "Compatibility-switch test: disabled extensions still emitted reserve-mobility output.");
+}
+
+void test_extensions_can_be_switched_independently()
+{
+    const auto robot = make_kinova_description();
+    const auto task = make_rotation_task(robot, 0.02, 3);
+
+    cc_affordance_planner::PlannerConfig no_nullspace_config;
+    no_nullspace_config.update_method = cc_affordance_planner::UpdateMethod::INVERSE;
+    no_nullspace_config.enable_joint_limits = true;
+    no_nullspace_config.enable_nullspace_planning = false;
+    const auto no_nullspace = cc_affordance_planner::CcAffordancePlannerInterface(no_nullspace_config)
+                                  .generate_joint_trajectory(robot, task);
+    require(no_nullspace.success && no_nullspace.reserve_mobility_used,
+            "Independent-switch test: disabling null-space planning did not produce a whole-body solution.");
+
+    auto tightly_limited_robot = robot;
+    tightly_limited_robot.joint_lower_limits = Eigen::VectorXd::Constant(7, -2e-5);
+    tightly_limited_robot.joint_upper_limits = Eigen::VectorXd::Constant(7, 2e-5);
+    cc_affordance_planner::PlannerConfig no_limits_config;
+    no_limits_config.update_method = cc_affordance_planner::UpdateMethod::INVERSE;
+    no_limits_config.enable_joint_limits = false;
+    no_limits_config.enable_nullspace_planning = true;
+    const auto no_limits = cc_affordance_planner::CcAffordancePlannerInterface(no_limits_config)
+                               .generate_joint_trajectory(tightly_limited_robot, task);
+    require(no_limits.success &&
+                no_limits.trajectory_description == cc_affordance_planner::TrajectoryDescription::FULL,
+            "Independent-switch test: null-space planning without bounds did not complete.");
+    require(!no_limits.reserve_mobility_used &&
+                no_limits.joint_trajectory.back().head(7).cwiseAbs().maxCoeff() > 2e-5,
+            "Independent-switch test: disabled joint limits were still enforced or the base was not stationary.");
+}
+
 void test_kinova_integration()
 {
     cc_affordance_planner::PlannerConfig config;
@@ -288,6 +352,8 @@ int main()
         test_rank_loss_keeps_only_unavoidable_base_motion();
         test_closure_uses_same_hierarchy();
         test_finite_rotation_reserve_closure();
+        test_disabled_extensions_are_exactly_legacy_cca();
+        test_extensions_can_be_switched_independently();
         test_kinova_integration();
         std::cout << "All RM-CCA deterministic and integration tests passed.\n";
         return 0;
