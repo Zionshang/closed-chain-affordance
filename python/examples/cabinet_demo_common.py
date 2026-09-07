@@ -1,10 +1,11 @@
-"""Shared Piper-L setup for the cabinet drawer and door examples."""
+"""Shared Piper-L setup for the drawer, door, and valve examples."""
 
 from __future__ import annotations
 
 import argparse
 import math
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -32,8 +33,87 @@ CABINET_URDF = ROOT / "python/assets/object/cabinet/urdf/cabinet.urdf"
 ARM_DOF = 6
 TRAJECTORY_POINTS = 12
 POSE_IK_ITERATIONS = 500
-ARM_SAFETY_HALF_RANGE = 0.15
-FROZEN_BASE_HALF_RANGE = 1e-12
+FLOATING_BASE_DOF_NAMES = ("px", "py", "pz", "rx", "ry", "rz")
+
+
+@dataclass(frozen=True)
+class FloatingBaseConfig:
+    """Floating-base pose plus ``{DOF name: (lower, upper)}`` mobility."""
+
+    initial_position: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    initial_rpy: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    dof_limits: dict[str, tuple[float, float]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        position = np.asarray(self.initial_position, dtype=float)
+        rpy = np.asarray(self.initial_rpy, dtype=float)
+        if position.shape != (3,) or rpy.shape != (3,) or not np.isfinite(
+            np.concatenate((position, rpy))
+        ).all():
+            raise ValueError(
+                "floating-base initial_position and initial_rpy must be "
+                "finite 3-vectors"
+            )
+        unknown = set(self.dof_limits) - set(FLOATING_BASE_DOF_NAMES)
+        if unknown:
+            raise ValueError(f"unknown floating-base DOFs: {sorted(unknown)}")
+        for name, interval in self.dof_limits.items():
+            values = np.asarray(interval, dtype=float)
+            if (
+                values.shape != (2,)
+                or np.isnan(values).any()
+                or not values[0] < values[1]
+            ):
+                raise ValueError(
+                    f"floating-base DOF {name!r} requires a "
+                    "(lower, upper) interval"
+                )
+            if not values[0] <= 0.0 <= values[1]:
+                raise ValueError(
+                    f"floating-base DOF {name!r} limits must contain zero "
+                    "displacement"
+                )
+
+    @property
+    def enabled_mask(self) -> np.ndarray:
+        return np.asarray(
+            [name in self.dof_limits for name in FLOATING_BASE_DOF_NAMES],
+            dtype=bool,
+        )
+
+    @property
+    def enabled_dofs(self) -> tuple[str, ...]:
+        return tuple(
+            name for name in FLOATING_BASE_DOF_NAMES if name in self.dof_limits
+        )
+
+    def make_description(
+        self, translation_max_step: float, rotation_max_step: float
+    ) -> cca.ReserveMobilityDescription:
+        reserve = cca.make_floating_base_reserve_description(
+            self.initial_pose(), translation_max_step, rotation_max_step
+        )
+        lower = np.zeros(6)
+        upper = np.zeros(6)
+        for index, name in enumerate(FLOATING_BASE_DOF_NAMES):
+            if name in self.dof_limits:
+                lower[index], upper[index] = self.dof_limits[name]
+        reserve.lower_limits = lower
+        reserve.upper_limits = upper
+        return reserve
+
+    def initial_pose(self) -> np.ndarray:
+        rx, ry, rz = self.initial_rpy
+        cx, sx = math.cos(rx), math.sin(rx)
+        cy, sy = math.cos(ry), math.sin(ry)
+        cz, sz = math.cos(rz), math.sin(rz)
+        rotation_x = np.asarray(((1, 0, 0), (0, cx, -sx), (0, sx, cx)))
+        rotation_y = np.asarray(((cy, 0, sy), (0, 1, 0), (-sy, 0, cy)))
+        rotation_z = np.asarray(((cz, -sz, 0), (sz, cz, 0), (0, 0, 1)))
+        pose = np.eye(4)
+        pose[:3, :3] = rotation_z @ rotation_y @ rotation_x
+        pose[:3, 3] = np.asarray(self.initial_position)
+        return pose
 
 
 def parse_args(description: str, default_port: int) -> argparse.Namespace:
@@ -83,6 +163,21 @@ def load_piper() -> tuple[cca.RobotDescription, cca.RobotConfig]:
     return robot, robot_config
 
 
+def transform_robot_description(
+    robot: cca.RobotDescription, base_pose: np.ndarray
+) -> cca.RobotDescription:
+    """Express the local Piper kinematic model at a fixed world base pose."""
+    pose = np.asarray(base_pose, dtype=float)
+    transformed = cca.RobotDescription()
+    transformed.slist = np.asarray(cca.adjoint(pose)) @ np.asarray(robot.slist)
+    transformed.M = pose @ np.asarray(robot.M)
+    transformed.joint_states = np.asarray(robot.joint_states).copy()
+    transformed.joint_lower_limits = np.asarray(robot.joint_lower_limits).copy()
+    transformed.joint_upper_limits = np.asarray(robot.joint_upper_limits).copy()
+    transformed.gripper_state = robot.gripper_state
+    return transformed
+
+
 def planner_config(
     *,
     enable_joint_limits: bool = True,
@@ -115,9 +210,16 @@ def solve_grasp(
     robot: cca.RobotDescription,
     handle_position: np.ndarray,
     grasp_roll: float,
+    base_pose: np.ndarray | None = None,
 ) -> np.ndarray:
+    if base_pose is None:
+        base_pose = np.eye(4)
+    robot_world = transform_robot_description(robot, base_pose)
     initial_pose = np.asarray(
-        cca.fkin_space(robot.M, robot.slist, robot.joint_states), dtype=float
+        cca.fkin_space(
+            robot_world.M, robot_world.slist, robot_world.joint_states
+        ),
+        dtype=float,
     )
     roll = np.array(
         [
@@ -126,12 +228,12 @@ def solve_grasp(
             [0.0, math.sin(grasp_roll), math.cos(grasp_roll)],
         ]
     )
-    target_pose = initial_pose.copy()
-    target_pose[:3, :3] = initial_pose[:3, :3] @ roll
-    target_pose[:3, 3] = handle_position
+    target_pose_world = initial_pose.copy()
+    target_pose_world[:3, :3] = initial_pose[:3, :3] @ roll
+    target_pose_world[:3, 3] = handle_position
     grasp_joints, success = cca.solve_pose_ik(
-        robot,
-        target_pose,
+        robot_world,
+        target_pose_world,
         POSE_IK_ITERATIONS,
         1e-4,
         1e-4,
@@ -145,103 +247,71 @@ def solve_grasp(
 def robot_at_grasp(
     robot_config: cca.RobotConfig,
     grasp_joints: np.ndarray,
-    safety_half_range: float | None = None,
+    base_pose: np.ndarray | None = None,
 ) -> cca.RobotDescription:
-    """Create the grasp state, optionally intersecting it with an operating envelope."""
+    """Create the grasp state using exactly the limits extracted from the URDF."""
     robot = cca.make_robot_description(robot_config, grasp_joints)
-    if safety_half_range is not None:
-        robot.joint_lower_limits = np.maximum(
-            np.asarray(robot.joint_lower_limits),
-            grasp_joints - safety_half_range,
-        )
-        robot.joint_upper_limits = np.minimum(
-            np.asarray(robot.joint_upper_limits),
-            grasp_joints + safety_half_range,
-        )
-    return robot
+    if base_pose is None:
+        base_pose = np.eye(4)
+    return transform_robot_description(robot, base_pose)
 
 
-def freeze_base_mobility(task: cca.TaskDescription) -> None:
-    """Keep the RM solver active while reducing reserve mobility to numerical zero."""
-    reserve = task.reserve_mobility
-    reserve.lower_limits = np.full(6, -FROZEN_BASE_HALF_RANGE)
-    reserve.upper_limits = np.full(6, FROZEN_BASE_HALF_RANGE)
-    task.reserve_mobility = reserve
-
-
-def assert_configured_full_plan(
+def validate_plan(
     result: cca.PlannerResult,
-    grasp_joints: np.ndarray,
+    robot: cca.RobotDescription,
+    base_config: FloatingBaseConfig,
     *,
-    enable_joint_limits: bool,
-    enable_nullspace_planning: bool,
+    maximum_points: int,
+    reserve_enabled: bool,
+    enforce_arm_limits: bool,
 ) -> np.ndarray:
-    """Check output invariants shared by the three non-default ablations."""
+    """Validate URDF arm limits and the configured floating-base limits."""
     trajectory = np.asarray(result.joint_trajectory)
-    assert result.success
-    assert result.trajectory_description == cca.TrajectoryDescription.FULL
-    assert trajectory.shape == (TRAJECTORY_POINTS, ARM_DOF + 2)
+    if not result.success or trajectory.size == 0:
+        raise RuntimeError(
+            "the requested floating-base DOFs/limits leave no feasible trajectory point"
+        )
+    assert trajectory.ndim == 2
+    assert trajectory.shape[1] >= ARM_DOF + 1
+    assert 1 <= trajectory.shape[0] <= maximum_points
     assert bool(np.isfinite(trajectory).all())
-
-    if enable_joint_limits:
-        arm_motion = np.max(np.abs(trajectory[:, :ARM_DOF] - grasp_joints))
-        assert arm_motion <= ARM_SAFETY_HALF_RANGE + 1e-9
+    if enforce_arm_limits:
+        arm = trajectory[:, :ARM_DOF]
+        lower_arm = np.asarray(robot.joint_lower_limits)
+        upper_arm = np.asarray(robot.joint_upper_limits)
+        assert np.all(arm >= lower_arm[None, :] - 1e-9)
+        assert np.all(arm <= upper_arm[None, :] + 1e-9)
 
     reserve = np.asarray(result.reserve_trajectory)
-    if not enable_joint_limits and not enable_nullspace_planning:
+    if not reserve_enabled:
         assert reserve.size == 0
-        assert len(result.reserve_pose_trajectory) == 0
-        assert not result.reserve_mobility_used
-    else:
-        assert reserve.shape == (TRAJECTORY_POINTS, 6)
-        assert bool(np.isfinite(reserve).all())
-    return trajectory
+        return trajectory
 
-
-def assert_arm_only_partial_plan(
-    result: cca.PlannerResult, grasp_joints: np.ndarray
-) -> np.ndarray:
-    assert result is not None
-    trajectory = np.asarray(result.joint_trajectory)
-    assert bool(np.isfinite(trajectory).all())
-    assert result.success
-    assert result.trajectory_description == cca.TrajectoryDescription.PARTIAL
-    assert 1 <= trajectory.shape[0] < TRAJECTORY_POINTS
-    arm_motion = np.max(np.abs(trajectory[:, :ARM_DOF] - grasp_joints))
-    assert 0.05 < arm_motion <= ARM_SAFETY_HALF_RANGE + 1e-9
-    reserve = np.asarray(result.reserve_trajectory)
     assert reserve.shape == (trajectory.shape[0], 6)
     assert bool(np.isfinite(reserve).all())
-    assert not result.reserve_mobility_used
-    assert result.reserve_activation_count == 0
-    assert np.max(np.linalg.norm(reserve, axis=1)) < 1e-8
+    initial = np.zeros(6)
+    lower = np.zeros(6)
+    upper = np.zeros(6)
+    for index, name in enumerate(FLOATING_BASE_DOF_NAMES):
+        if name in base_config.dof_limits:
+            lower[index], upper[index] = base_config.dof_limits[name]
+    assert np.all(reserve >= lower[None, :] - 1e-9)
+    assert np.all(reserve <= upper[None, :] + 1e-9)
+    assert np.allclose(reserve[0], initial, atol=1e-12)
+    disabled = ~base_config.enabled_mask
+    if disabled.any():
+        assert np.allclose(reserve[:, disabled], initial[disabled], atol=1e-12)
     return trajectory
 
 
-def assert_base_assisted_full_plan(
-    result: cca.PlannerResult, grasp_joints: np.ndarray
-) -> np.ndarray:
-    assert result is not None
-    trajectory = np.asarray(result.joint_trajectory)
-    assert bool(np.isfinite(trajectory).all())
-    assert result.success
-    assert result.trajectory_description == cca.TrajectoryDescription.FULL
-    assert trajectory.shape[0] == TRAJECTORY_POINTS
-    arm_motion = np.max(np.abs(trajectory[:, :ARM_DOF] - grasp_joints))
-    assert 0.05 < arm_motion <= ARM_SAFETY_HALF_RANGE + 1e-9
-    reserve = np.asarray(result.reserve_trajectory)
-    assert reserve.shape == (TRAJECTORY_POINTS, 6)
-    assert bool(np.isfinite(reserve).all())
-    assert result.reserve_mobility_used
-    assert result.reserve_activation_count >= 1
-    assert np.max(np.linalg.norm(reserve, axis=1)) > 0.05
-    active = np.flatnonzero(np.asarray(result.reserve_active, dtype=bool))
-    assert active.size >= 1
-    # The arm must reach its operating boundary before base assistance begins.
-    assert np.max(
-        np.abs(trajectory[active[0], :ARM_DOF] - grasp_joints)
-    ) >= (ARM_SAFETY_HALF_RANGE - 1e-4)
-    return trajectory
+def minimum_arm_limit_clearance(
+    robot: cca.RobotDescription, result: cca.PlannerResult
+) -> float:
+    """Return the minimum signed distance to a real URDF arm limit."""
+    arm = np.asarray(result.joint_trajectory)[:, :ARM_DOF]
+    lower = np.asarray(robot.joint_lower_limits)[None, :]
+    upper = np.asarray(robot.joint_upper_limits)[None, :]
+    return float(np.min(np.minimum(arm - lower, upper - arm)))
 
 
 def world_tool_positions(

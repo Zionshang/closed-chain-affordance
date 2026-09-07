@@ -1,4 +1,4 @@
-"""Mesh-based Viser animation for the cabinet drawer and door examples."""
+"""Mesh-based Viser animation for the drawer, door, and valve examples."""
 
 from __future__ import annotations
 
@@ -38,23 +38,119 @@ class CabinetTaskScene:
     motion_path: np.ndarray
 
 
+@dataclass(frozen=True)
+class ValveTaskScene:
+    center_position: np.ndarray
+    rotation_axis: np.ndarray
+    joint_goal: float
+    handle_position: np.ndarray
+    handle_axis: np.ndarray
+    motion_path: np.ndarray
+    grasp_radius: float = 0.1425
+    rim_tube_radius: float = 0.0175
+
+
 def _quaternion(rotation: np.ndarray) -> np.ndarray:
     """Convert a rotation matrix to Viser's scalar-first quaternion."""
     return Rotation.from_matrix(rotation).as_quat()[[3, 0, 1, 2]]
 
 
+def _color_mesh(mesh, rgba: tuple[int, int, int, int]):
+    mesh.visual.face_colors = np.asarray(rgba, dtype=np.uint8)
+    return mesh
+
+
+def _add_procedural_valve(server, root: str, scene: ValveTaskScene, offset: np.ndarray):
+    """Recreate rl_art_mj's six-spoke valve from the same primitive geometry."""
+    import trimesh
+
+    valve_root = server.scene.add_frame(
+        f"{root}/valve",
+        position=np.asarray(scene.center_position) + offset,
+        show_axes=False,
+    )
+    fixed_mesh = trimesh.util.concatenate(
+        [
+            _color_mesh(
+                trimesh.creation.cylinder(
+                    radius=0.0425,
+                    segment=np.asarray(((0.0, 0.0, 0.0), (0.09, 0.0, 0.0))),
+                ),
+                (77, 79, 84, 255),
+            ),
+            _color_mesh(
+                trimesh.creation.cylinder(
+                    radius=0.029,
+                    segment=np.asarray(((-0.0375, 0.0, 0.0), (0.0475, 0.0, 0.0))),
+                ),
+                (77, 79, 84, 255),
+            ),
+        ]
+    )
+    server.scene.add_mesh_trimesh(f"{root}/valve/fixed", fixed_mesh)
+
+    wheel_root = server.scene.add_frame(f"{root}/valve/wheel", show_axes=False)
+    wheel_parts = [
+        _color_mesh(
+            trimesh.creation.cylinder(
+                radius=0.045,
+                segment=np.asarray(((-0.0275, 0.0, 0.0), (0.0275, 0.0, 0.0))),
+            ),
+            (230, 46, 31, 255),
+        )
+    ]
+    spoke_inner_radius = 0.027
+    for index in range(6):
+        angle = 2.0 * np.pi * index / 6.0
+        direction = np.asarray((0.0, np.cos(angle), np.sin(angle)))
+        wheel_parts.append(
+            _color_mesh(
+                trimesh.creation.cylinder(
+                    radius=0.012,
+                    segment=np.stack(
+                        [
+                            spoke_inner_radius * direction,
+                            scene.grasp_radius * direction,
+                        ]
+                    ),
+                ),
+                (191, 26, 20, 255),
+            )
+        )
+    rim = trimesh.creation.torus(
+        major_radius=scene.grasp_radius,
+        minor_radius=scene.rim_tube_radius,
+        major_sections=48,
+        minor_sections=12,
+    )
+    rim.apply_transform(
+        trimesh.transformations.rotation_matrix(np.pi / 2.0, (0.0, 1.0, 0.0))
+    )
+    wheel_parts.append(_color_mesh(rim, (191, 26, 20, 255)))
+    server.scene.add_mesh_trimesh(
+        f"{root}/valve/wheel/geometry", trimesh.util.concatenate(wheel_parts)
+    )
+    return valve_root, wheel_root
+
+
 class CabinetVisualizer:
-    """Animate real Piper-L and cabinet meshes with an SE(3) base trajectory."""
+    """Animate Piper-L with a cabinet or procedural valve and an SE(3) base."""
 
     def __init__(
         self,
         robot: cca.RobotDescription,
         robot_urdf: Path,
         *,
+        initial_base_pose: np.ndarray | None = None,
         config: VisualizationConfig = VisualizationConfig(),
     ) -> None:
         self.robot = robot
         self.robot_urdf = robot_urdf
+        if initial_base_pose is None:
+            initial_base_pose = np.eye(4)
+        self.initial_base_pose = np.asarray(initial_base_pose, dtype=float)
+        if self.initial_base_pose.shape != (4, 4):
+            raise ValueError("initial_base_pose must be a 4 x 4 transform")
         self.config = config
 
     def _world_tool_path(self, result: cca.PlannerResult, offset: np.ndarray):
@@ -80,7 +176,7 @@ class CabinetVisualizer:
     def show(
         self,
         cases: list[TrajectoryCase],
-        task_scene: CabinetTaskScene,
+        task_scene: CabinetTaskScene | ValveTaskScene,
         *,
         duration_s: float | None = None,
         markdown: str,
@@ -116,9 +212,6 @@ class CabinetVisualizer:
         )
         play = server.gui.add_checkbox("Play", initial_value=True)
 
-        cabinet_yaw_rotation = Rotation.from_euler(
-            "z", task_scene.cabinet_yaw
-        ).as_matrix()
         case_handles = []
         for case_index, (case, trajectory, poses) in enumerate(
             zip(cases, trajectories, base_poses)
@@ -155,21 +248,31 @@ class CabinetVisualizer:
                 position=(0.0, 0.0, -0.05),
             )
 
-            cabinet_root = server.scene.add_frame(
-                f"{root}/cabinet",
-                position=np.asarray(task_scene.cabinet_position) + offset,
-                wxyz=_quaternion(cabinet_yaw_rotation),
-                axes_length=0.0,
-                axes_radius=0.001,
-            )
-            cabinet_mesh = ViserUrdf(
-                server,
-                task_scene.urdf_path,
-                root_node_name=f"{root}/cabinet",
-                load_meshes=True,
-            )
-            cabinet_joint_names = cabinet_mesh.get_actuated_joint_names()
-            cabinet_joint_index = cabinet_joint_names.index(task_scene.joint_name)
+            if isinstance(task_scene, CabinetTaskScene):
+                cabinet_yaw_rotation = Rotation.from_euler(
+                    "z", task_scene.cabinet_yaw
+                ).as_matrix()
+                object_root = server.scene.add_frame(
+                    f"{root}/cabinet",
+                    position=np.asarray(task_scene.cabinet_position) + offset,
+                    wxyz=_quaternion(cabinet_yaw_rotation),
+                    axes_length=0.0,
+                    axes_radius=0.001,
+                )
+                object_mesh = ViserUrdf(
+                    server,
+                    task_scene.urdf_path,
+                    root_node_name=f"{root}/cabinet",
+                    load_meshes=True,
+                )
+                object_joint_index = object_mesh.get_actuated_joint_names().index(
+                    task_scene.joint_name
+                )
+            else:
+                object_root, object_mesh = _add_procedural_valve(
+                    server, root, task_scene, offset
+                )
+                object_joint_index = None
 
             motion_path = np.asarray(task_scene.motion_path) + offset
             if motion_path.shape[0] > 1:
@@ -193,7 +296,8 @@ class CabinetVisualizer:
             )
 
             tool_path = self._world_tool_path(case.result, offset)
-            base_path = poses[:, :3, 3] + offset
+            world_base_poses = poses @ self.initial_base_pose
+            base_path = world_base_poses[:, :3, 3] + offset
             if tool_path.shape[0] > 1:
                 server.scene.add_line_segments(
                     f"{root}/tool_path",
@@ -213,9 +317,9 @@ class CabinetVisualizer:
                     offset,
                     robot_root,
                     robot_mesh,
-                    cabinet_root,
-                    cabinet_mesh,
-                    cabinet_joint_index,
+                    object_root,
+                    object_mesh,
+                    object_joint_index,
                 )
             )
 
@@ -231,11 +335,11 @@ class CabinetVisualizer:
                     offset,
                     robot_root,
                     robot_mesh,
-                    _cabinet_root,
-                    cabinet_mesh,
-                    cabinet_joint_index,
+                    _object_root,
+                    object_mesh,
+                    object_joint_index,
                 ) = handles
-                base_pose = poses[local_frame]
+                base_pose = poses[local_frame] @ self.initial_base_pose
                 robot_root.position = base_pose[:3, 3] + offset
                 robot_root.wxyz = _quaternion(base_pose[:3, :3])
                 robot_mesh.update_cfg(trajectory[local_frame, :ARM_DOF])
@@ -252,20 +356,26 @@ class CabinetVisualizer:
                             1.0,
                         )
                     )
-                cabinet_configuration = np.zeros(
-                    len(cabinet_mesh.get_actuated_joint_names())
-                )
-                cabinet_configuration[cabinet_joint_index] = (
-                    progress * task_scene.joint_goal
-                )
-                cabinet_mesh.update_cfg(cabinet_configuration)
+                object_angle = progress * task_scene.joint_goal
+                if isinstance(task_scene, CabinetTaskScene):
+                    object_configuration = np.zeros(
+                        len(object_mesh.get_actuated_joint_names())
+                    )
+                    object_configuration[object_joint_index] = object_angle
+                    object_mesh.update_cfg(object_configuration)
+                else:
+                    axis = np.asarray(task_scene.rotation_axis, dtype=float)
+                    axis /= np.linalg.norm(axis)
+                    object_mesh.wxyz = _quaternion(
+                        Rotation.from_rotvec(object_angle * axis).as_matrix()
+                    )
 
         @frame_slider.on_update
         def _(_) -> None:
             update_scene(int(frame_slider.value))
 
         update_scene(0)
-        print("  Real Piper-L and cabinet meshes loaded; Ctrl+C to stop.")
+        print("  Piper-L and articulated task geometry loaded; Ctrl+C to stop.")
         start = time.monotonic()
         frame = 0
         try:

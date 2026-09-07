@@ -565,7 +565,7 @@ void CcAffordancePlannerInterface::validate_input_(const affordance_util::RobotD
         for (Eigen::Index i = 0; i < reserve.lower_limits.size(); ++i)
         {
             if (std::isnan(reserve.lower_limits(i)) || std::isnan(reserve.upper_limits(i)) ||
-                !(reserve.lower_limits(i) < reserve.upper_limits(i)) ||
+                reserve.lower_limits(i) > reserve.upper_limits(i) ||
                 reserve.initial_state(i) < reserve.lower_limits(i) || reserve.initial_state(i) > reserve.upper_limits(i))
             {
                 throw std::invalid_argument("Reserve mobility: invalid limits or initial state outside limits.");

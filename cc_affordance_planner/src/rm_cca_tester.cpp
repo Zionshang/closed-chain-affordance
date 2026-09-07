@@ -97,6 +97,23 @@ void test_boundary_joint_reactivates_inward()
             "Reactivation test: an inward-moving joint was incorrectly frozen.");
 }
 
+void test_zero_width_bound_disables_reserve_dof()
+{
+    Eigen::MatrixXd jacobian(1, 2);
+    jacobian << 1.0, 1.0;
+    const Eigen::VectorXd error = Eigen::VectorXd::Ones(1);
+    const Eigen::Vector2d state(0.3, 0.0);
+    const Eigen::Vector2d lower(0.3, -10.0);
+    const Eigen::Vector2d upper(0.3, 10.0);
+    const auto step = cc_affordance_planner::compute_feasible_nullspace_step(
+        jacobian, error, state, lower, upper, {1}, {0}, 1e-12, 1e-12);
+
+    require(step.task_residual.norm() < 1e-12 && step.base_delta.norm() == 0.0,
+            "Disabled-DOF test: a zero-width reserve coordinate moved or changed the primary task.");
+    require(std::abs(step.delta(1) - 1.0) < 1e-12 && step.frozen_variable_indices == std::vector<size_t>{0},
+            "Disabled-DOF test: a fixed reserve coordinate was not removed from feasible mobility.");
+}
+
 void test_rank_loss_keeps_only_unavoidable_base_motion()
 {
     Eigen::Matrix2d jacobian;
@@ -349,6 +366,7 @@ int main()
         test_projected_numerical_zero_is_truncated();
         test_bound_exhaustion_keeps_unavoidable_base_motion();
         test_boundary_joint_reactivates_inward();
+        test_zero_width_bound_disables_reserve_dof();
         test_rank_loss_keeps_only_unavoidable_base_motion();
         test_closure_uses_same_hierarchy();
         test_finite_rotation_reserve_closure();

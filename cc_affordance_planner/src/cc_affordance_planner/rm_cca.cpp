@@ -191,7 +191,7 @@ FeasibleNullSpaceStep compute_feasible_nullspace_step(
     }
     for (Eigen::Index i = 0; i < variable_count; ++i)
     {
-        if (std::isnan(lower_limits(i)) || std::isnan(upper_limits(i)) || !(lower_limits(i) < upper_limits(i)) ||
+        if (std::isnan(lower_limits(i)) || std::isnan(upper_limits(i)) || lower_limits(i) > upper_limits(i) ||
             state(i) < lower_limits(i) - bound_tolerance || state(i) > upper_limits(i) + bound_tolerance)
         {
             throw std::invalid_argument("Hierarchy state is outside an invalid bound interval.");
@@ -201,8 +201,24 @@ FeasibleNullSpaceStep compute_feasible_nullspace_step(
     FeasibleNullSpaceStep result;
     result.delta = Eigen::VectorXd::Zero(variable_count);
     result.active_arm_dof_count = arm_column_indices.size();
-    std::vector<size_t> active_indices(static_cast<size_t>(variable_count));
-    std::iota(active_indices.begin(), active_indices.end(), 0);
+    std::vector<size_t> active_indices;
+    active_indices.reserve(static_cast<size_t>(variable_count));
+    for (Eigen::Index i = 0; i < variable_count; ++i)
+    {
+        if (upper_limits(i) - lower_limits(i) <= bound_tolerance)
+        {
+            const size_t fixed_index = static_cast<size_t>(i);
+            result.frozen_variable_indices.push_back(fixed_index);
+            if (arm_set.erase(fixed_index) > 0)
+            {
+                --result.active_arm_dof_count;
+            }
+        }
+        else
+        {
+            active_indices.push_back(static_cast<size_t>(i));
+        }
+    }
 
     const double solve_tolerance =
         std::numeric_limits<double>::epsilon() * 100.0 * std::max(1.0, error.norm());

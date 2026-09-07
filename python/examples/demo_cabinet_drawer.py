@@ -9,26 +9,24 @@ import numpy as np
 
 from cabinet_demo_common import (
     ARM_DOF,
-    ARM_SAFETY_HALF_RANGE,
     CABINET_URDF,
+    FloatingBaseConfig,
     TRAJECTORY_POINTS,
     URDF,
-    assert_arm_only_partial_plan,
-    assert_base_assisted_full_plan,
-    assert_configured_full_plan,
     cabinet_point,
     cca,
-    freeze_base_mobility,
     load_piper,
+    minimum_arm_limit_clearance,
     parse_args,
     planner_config,
     robot_at_grasp,
     solve_grasp,
+    validate_plan,
     world_tool_positions,
 )
 
 
-CABINET_POSITION = (0.70, 0.0, 0.20)
+CABINET_POSITION = (0.60, 0.0, 0.20)
 CABINET_YAW = math.pi
 DRAWER_1_HANDLE_LOCAL = (0.161706, 0.149577, 0.198016)
 DRAWER_HANDLE_AXIS = (0.0, -1.0, 0.0)
@@ -36,13 +34,28 @@ DRAWER_PULL_AXIS = (-0.999816, -0.018917, -0.003302)
 DRAWER_PULL_DISTANCE = 0.15
 GRASP_ROLL = -math.pi / 2
 
+# Configure the floating base here, not through the CLI. Dictionary keys are
+# enabled relative DOFs; omitted keys ("rx" here) are fixed exactly at zero.
+FLOATING_BASE = FloatingBaseConfig(
+    initial_position=(0.0, -0.1, 0.0),
+    initial_rpy=(0.0, 0.0, 0.0),
+    dof_limits={
+        "px": (-0.60, 0.60),
+        "py": (-0.60, 0.60),
+        "pz": (-0.50, 0.50),
+        "ry": (-math.pi, math.pi),
+        "rz": (-math.pi, math.pi),
+    },
+)
+
 
 @dataclass(frozen=True)
 class DemoResult:
     robot: cca.RobotDescription
-    arm_only_plan: cca.PlannerResult | None
-    assisted_plan: cca.PlannerResult
+    plan: cca.PlannerResult
     grasp_joints: np.ndarray
+    initial_base_pose: np.ndarray
+    base_config: FloatingBaseConfig
     handle_position: np.ndarray
     pull_axis: np.ndarray
     pull_distance: float
@@ -54,6 +67,7 @@ def drawer_task(
     handle_position: np.ndarray,
     pull_axis: np.ndarray,
     pull_distance: float,
+    base_config: FloatingBaseConfig = FLOATING_BASE,
 ) -> cca.TaskDescription:
     task = cca.TaskDescription()
     task.affordance_info.type = cca.ScrewType.TRANSLATION
@@ -61,10 +75,8 @@ def drawer_task(
     task.affordance_info.location = handle_position
     task.goal.affordance = pull_distance
     task.trajectory_density = TRAJECTORY_POINTS
-    task.vir_screw_order = cca.VirtualScrewOrder.Y
-    task.reserve_mobility = cca.make_floating_base_reserve_description(
-        np.eye(4), translation_max_step=0.05, rotation_max_step=0.10
-    )
+    task.vir_screw_order = cca.VirtualScrewOrder.NONE
+    task.reserve_mobility = base_config.make_description(0.05, 0.10)
     return task
 
 
@@ -72,108 +84,82 @@ def run_demo(
     *,
     enable_joint_limits: bool = True,
     enable_nullspace_planning: bool = True,
+    base_config: FloatingBaseConfig = FLOATING_BASE,
 ) -> DemoResult:
     seed_robot, robot_config = load_piper()
     handle_position = cabinet_point(CABINET_POSITION, DRAWER_1_HANDLE_LOCAL)
     pull_axis = np.asarray(DRAWER_PULL_AXIS, dtype=float)
     pull_axis /= np.linalg.norm(pull_axis)
-    pull_distance = DRAWER_PULL_DISTANCE
-    grasp_joints = solve_grasp(seed_robot, handle_position, GRASP_ROLL)
-    robot = robot_at_grasp(
-        robot_config, grasp_joints, ARM_SAFETY_HALF_RANGE
+    reserve_enabled = enable_joint_limits or enable_nullspace_planning
+    initial_base_pose = base_config.initial_pose() if reserve_enabled else np.eye(4)
+    grasp_joints = solve_grasp(
+        seed_robot, handle_position, GRASP_ROLL, initial_base_pose
     )
+    robot = robot_at_grasp(robot_config, grasp_joints, initial_base_pose)
     config = planner_config(
         enable_joint_limits=enable_joint_limits,
         enable_nullspace_planning=enable_nullspace_planning,
     )
-    arm_only_plan = None
-    arm_only_trajectory = None
-    if enable_joint_limits and enable_nullspace_planning:
-        arm_only_task = drawer_task(handle_position, pull_axis, pull_distance)
-        freeze_base_mobility(arm_only_task)
-        arm_only_plan = cca.PlannerInterface(config).generate_joint_trajectory(
-            robot, arm_only_task
-        )
-        arm_only_trajectory = assert_arm_only_partial_plan(
-            arm_only_plan, grasp_joints
-        )
-
-    assisted_task = drawer_task(handle_position, pull_axis, pull_distance)
-    assisted_plan = cca.PlannerInterface(config).generate_joint_trajectory(
-        robot, assisted_task
+    task = drawer_task(
+        handle_position,
+        pull_axis,
+        DRAWER_PULL_DISTANCE,
+        base_config,
     )
-    if enable_joint_limits and enable_nullspace_planning:
-        assisted_trajectory = assert_base_assisted_full_plan(
-            assisted_plan, grasp_joints
-        )
-    else:
-        assisted_trajectory = assert_configured_full_plan(
-            assisted_plan,
-            grasp_joints,
-            enable_joint_limits=enable_joint_limits,
-            enable_nullspace_planning=enable_nullspace_planning,
-        )
+    plan = cca.PlannerInterface(config).generate_joint_trajectory(robot, task)
+    validate_plan(
+        plan,
+        robot,
+        base_config,
+        maximum_points=TRAJECTORY_POINTS,
+        reserve_enabled=reserve_enabled,
+        enforce_arm_limits=enable_joint_limits,
+    )
 
-    expected_final = handle_position + pull_distance * pull_axis
-    assisted_tool_positions = world_tool_positions(robot, assisted_plan)
-
-    # Six physical joints + one free grasp-orientation coordinate + affordance.
-    assert assisted_trajectory.shape[1] == ARM_DOF + 2
-    if arm_only_plan is not None and arm_only_trajectory is not None:
-        arm_only_tool_positions = world_tool_positions(robot, arm_only_plan)
-        first_base_index = int(
-            np.flatnonzero(np.asarray(assisted_plan.reserve_active))[0]
-        )
-        assert arm_only_trajectory.shape[1] == ARM_DOF + 2
-        assert arm_only_trajectory.shape[0] == first_base_index
-        assert np.allclose(
-            arm_only_trajectory,
-            assisted_trajectory[:first_base_index],
-            atol=1e-10,
-        )
-        assert np.linalg.norm(arm_only_tool_positions[0] - handle_position) < 2e-4
-        assert np.linalg.norm(arm_only_tool_positions[-1] - expected_final) > 0.02
-    assert np.linalg.norm(assisted_tool_positions[-1] - expected_final) < 3e-4
-
+    expected_final = handle_position + DRAWER_PULL_DISTANCE * pull_axis
+    tool_positions = world_tool_positions(robot, plan)
+    assert np.linalg.norm(tool_positions[0] - handle_position) < 2e-4
+    if plan.trajectory_description == cca.TrajectoryDescription.FULL:
+        assert np.linalg.norm(tool_positions[-1] - expected_final) < 3e-4
     return DemoResult(
         robot=robot,
-        arm_only_plan=arm_only_plan,
-        assisted_plan=assisted_plan,
+        plan=plan,
         grasp_joints=grasp_joints,
+        initial_base_pose=initial_base_pose,
+        base_config=base_config,
         handle_position=handle_position,
         pull_axis=pull_axis,
-        pull_distance=pull_distance,
+        pull_distance=DRAWER_PULL_DISTANCE,
         enable_joint_limits=enable_joint_limits,
         enable_nullspace_planning=enable_nullspace_planning,
     )
 
 
 def print_diagnostics(result: DemoResult) -> None:
-    assisted = np.asarray(result.assisted_plan.joint_trajectory)
-    base = np.asarray(result.assisted_plan.reserve_trajectory)
+    trajectory = np.asarray(result.plan.joint_trajectory)
+    reserve = np.asarray(result.plan.reserve_trajectory)
     expected_final = result.handle_position + result.pull_distance * result.pull_axis
-    endpoint = world_tool_positions(result.robot, result.assisted_plan)[-1]
-    print(f"drawer pull: {result.pull_distance:.6f} m")
-    if result.arm_only_plan is not None:
-        arm_only = np.asarray(result.arm_only_plan.joint_trajectory)
-        first_base_index = int(
-            np.flatnonzero(np.asarray(result.assisted_plan.reserve_active))[0]
-        )
-        prefix = (
-            f"arm only: PARTIAL {arm_only.shape[0]}/{TRAJECTORY_POINTS}; "
-            f"base assistance starts at point {first_base_index + 1}; "
-        )
-    else:
-        prefix = (
-            f"joint limits={'on' if result.enable_joint_limits else 'off'}; "
-            f"null-space={'on' if result.enable_nullspace_planning else 'off'}; "
-        )
-    base_norm = np.linalg.norm(base[-1]) if base.size else 0.0
+    endpoint = world_tool_positions(result.robot, result.plan)[-1]
+    status = (
+        "FULL"
+        if result.plan.trajectory_description == cca.TrajectoryDescription.FULL
+        else "PARTIAL"
+    )
+    translation = np.linalg.norm(reserve[-1, :3]) if reserve.size else 0.0
+    rotation = np.linalg.norm(reserve[-1, 3:]) if reserve.size else 0.0
+    clearance = minimum_arm_limit_clearance(result.robot, result.plan)
+    print(f"drawer pull: {result.pull_distance:.6f} m; status: {status}")
     print(
-        prefix
-        + f"base norm: {base_norm:.3e}; "
-        + f"max arm delta: {np.max(np.abs(assisted[:, :ARM_DOF] - result.grasp_joints)):.3e} rad; "
-        + f"endpoint error: {np.linalg.norm(endpoint - expected_final):.3e} m"
+        f"joint limits={'on' if result.enable_joint_limits else 'off'}; "
+        f"null-space={'on' if result.enable_nullspace_planning else 'off'}; "
+        f"base DOFs={result.base_config.enabled_dofs}"
+    )
+    print(
+        f"base delta: {translation:.3e} m / {rotation:.3e} rad; "
+        f"minimum URDF-limit clearance: {clearance:.3e} rad; "
+        f"max arm delta: "
+        f"{np.max(np.abs(trajectory[:, :ARM_DOF] - result.grasp_joints)):.3e} rad; "
+        f"endpoint error: {np.linalg.norm(endpoint - expected_final):.3e} m"
     )
 
 
@@ -201,15 +187,10 @@ def main() -> None:
     CabinetVisualizer(
         result.robot,
         URDF,
+        initial_base_pose=result.initial_base_pose,
         config=VisualizationConfig(port=args.port),
     ).show(
-        [
-            TrajectoryCase(
-                "0.15 m drawer: configured CCA mode",
-                result.assisted_plan,
-                (30, 210, 235),
-            )
-        ],
+        [TrajectoryCase("0.15 m drawer", result.plan, (30, 210, 235))],
         CabinetTaskScene(
             urdf_path=CABINET_URDF,
             cabinet_position=np.asarray(CABINET_POSITION),
@@ -222,13 +203,10 @@ def main() -> None:
         ),
         duration_s=args.duration,
         markdown=(
-            "The real **Piper-L** and **cabinet** meshes are loaded from the "
-            "copied assets. This is one environment with a fixed **0.15 m** "
-            "drawer goal and two independently configurable switches. Joint limits "
-            f"are **{'on' if result.enable_joint_limits else 'off'}** and null-space "
-            f"planning is **{'on' if result.enable_nullspace_planning else 'off'}**. "
-            "With both off, the attached floating base is ignored and this is the "
-            "bit-identical legacy fixed-base CCA path."
+            "The Piper-L arm uses the joint limits copied from its URDF when "
+            "joint-limit handling is enabled. Floating-base pose, enabled DOFs "
+            f"**{result.base_config.enabled_dofs}**, and bounds are configured "
+            "in this demo's `FLOATING_BASE` dictionary."
         ),
     )
 

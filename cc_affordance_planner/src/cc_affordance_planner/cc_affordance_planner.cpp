@@ -158,7 +158,7 @@ void CcAffordancePlanner::configure_reserve_mobility(
     for (Eigen::Index i = 0; i < reserve_mobility.lower_limits.size(); ++i)
     {
         if (std::isnan(reserve_mobility.lower_limits(i)) || std::isnan(reserve_mobility.upper_limits(i)) ||
-            !(reserve_mobility.lower_limits(i) < reserve_mobility.upper_limits(i)) ||
+            reserve_mobility.lower_limits(i) > reserve_mobility.upper_limits(i) ||
             reserve_mobility.initial_state(i) < reserve_mobility.lower_limits(i) ||
             reserve_mobility.initial_state(i) > reserve_mobility.upper_limits(i))
         {
@@ -844,14 +844,16 @@ std::optional<Eigen::VectorXd> CcAffordancePlanner::call_rm_cc_ik_solver(
         Eigen::VectorXd::Constant(static_cast<Eigen::Index>(nof_pjoints_), -std::numeric_limits<double>::infinity());
     Eigen::VectorXd primary_upper =
         Eigen::VectorXd::Constant(static_cast<Eigen::Index>(nof_pjoints_), std::numeric_limits<double>::infinity());
+    // Reserve-coordinate limits also encode the user's enabled-DOF mask, so they remain active independently of the
+    // arm joint-limit ablation switch.
+    for (size_t i = 0; i < reserve_primary_indices_.size(); ++i)
+    {
+        const Eigen::Index primary_index = static_cast<Eigen::Index>(reserve_primary_indices_[i]);
+        primary_lower(primary_index) = reserve_mobility_.lower_limits(static_cast<Eigen::Index>(i));
+        primary_upper(primary_index) = reserve_mobility_.upper_limits(static_cast<Eigen::Index>(i));
+    }
     if (enable_joint_limits_)
     {
-        for (size_t i = 0; i < reserve_primary_indices_.size(); ++i)
-        {
-            const Eigen::Index primary_index = static_cast<Eigen::Index>(reserve_primary_indices_[i]);
-            primary_lower(primary_index) = reserve_mobility_.lower_limits(static_cast<Eigen::Index>(i));
-            primary_upper(primary_index) = reserve_mobility_.upper_limits(static_cast<Eigen::Index>(i));
-        }
         for (size_t i = 0; i < arm_primary_indices_.size(); ++i)
         {
             const Eigen::Index primary_index = static_cast<Eigen::Index>(arm_primary_indices_[i]);

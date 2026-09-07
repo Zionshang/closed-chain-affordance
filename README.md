@@ -239,7 +239,7 @@ The two RM extensions can be switched independently. Both default to `true`, pre
 |---|---|---|
 | `true` | `true` | Full bound-aware RM-CCA: arm first, reserve motion after feasible null-space exhaustion. |
 | `true` | `false` | Bound-aware whole-body pseudoinverse; no secondary base-stationarity objective. |
-| `false` | `true` | Null-space redistribution without absolute-coordinate bound enforcement. |
+| `false` | `true` | Null-space redistribution without arm joint-limit enforcement; configured reserve-coordinate limits remain active. |
 | `false` | `false` | Exact legacy mode: the reserve chain is ignored and the original fixed-base CCA model, solver selection, and trajectory conversion paths are used. |
 
 Whenever at least one extension is enabled together with reserve mobility, the planner uses its pseudoinverse path and
@@ -274,15 +274,16 @@ cmake -S python -B python/build \
 cmake --build python/build --target cca_cpp --parallel
 ```
 
-Only the two migrated cabinet tasks are kept as executable Python examples. Each command runs its pose-IK, RM-CCA,
-joint-limit, and endpoint assertions, then starts the real-mesh Viser viewer by default:
+Three Piper-L manipulation demos are provided. Each command runs its pose-IK, RM-CCA, joint-limit, and endpoint
+assertions, then starts Viser by default:
 
 ```bash
 python python/examples/demo_cabinet_drawer.py
 python python/examples/demo_cabinet_door.py
+python python/examples/demo_valve.py
 ```
 
-Both switches are also available directly in either example through Python's paired boolean flags:
+Both switches are also available directly in every example through Python's paired boolean flags:
 
 ```bash
 # Full RM-CCA (both are on by default)
@@ -296,17 +297,48 @@ python python/examples/demo_cabinet_drawer.py --no-joint-limits
 python python/examples/demo_cabinet_drawer.py --no-joint-limits --no-nullspace-planning
 ```
 
-Drawer uses `localhost:8081` and door uses `localhost:8080`. Use `--port` to override the port or `--duration` to stop
-the viewer automatically after a specified number of seconds.
+Door uses `localhost:8080`, drawer uses `localhost:8081`, and valve uses `localhost:8082`. Use `--port` to override the
+port or `--duration` to stop the viewer automatically after a specified number of seconds.
 
-Both tasks preserve the Piper-L, cabinet placement, handle/hinge definitions, and free virtual handle axis from the
-other project. The goals are deterministic: drawer pull is fixed at `0.15 m` and door opening is fixed at `-pi/2`
-(90 degrees). For a reproducible capability-exhaustion demonstration, the real URDF limits are intersected with a
-±0.15-rad operating envelope around the grasp. Each example internally verifies that a numerically frozen base returns
-`PARTIAL`, and that the assisted plan has a bit-identical arm-only prefix before the base moves and returns `FULL`.
-Viser renders only that single assisted environment: drawer base assistance starts at point 6 after the arm-only plan
-stops at 5/12; door assistance starts at point 3 after the arm-only plan stops at 2/12. The real Piper-L and articulated
+Floating-base numerical configuration is deliberately code-side only. Each demo has one `FLOATING_BASE` value near
+the task constants:
+
+```python
+FLOATING_BASE = FloatingBaseConfig(
+    initial_position=(0.25, 0.0, 0.0),
+    initial_rpy=(0.0, 0.0, 0.0),
+    dof_limits={
+        "px": (-0.60, 0.60),
+        "py": (-0.60, 0.60),
+        "pz": (-0.50, 0.50),
+        "ry": (-math.pi, math.pi),
+        "rz": (-math.pi, math.pi),
+    },
+)
+```
+
+The dictionary is the enable mask and the limit configuration at the same time. Its permitted keys are `px`, `py`,
+`pz`, `rx`, `ry`, and `rz`; the value is the `(lower, upper)` displacement from the configured initial pose. A missing
+key is disabled by assigning that reserve coordinate the exact bound `[0, 0]`. Thus the example above enables only
+`px py pz ry rz` and fixes `rx`. Every enabled interval must contain zero. Initial orientation uses fixed-axis RPY in
+radians and is composed as `Rz @ Ry @ Rx`. The Viser robot root and base path include this initial pose.
+
+No artificial arm operating envelope is used. In the default mode, all six Piper-L lower and upper limits are copied
+unchanged from `piper_l_fixed_gripper.urdf` and checked along every trajectory. The `--no-joint-limits` option exists
+only as the explicit algorithm ablation described above. Whether the base moves depends on the configured initial
+mounting pose: if the arm can complete the task inside its URDF limits, strict null-space planning keeps the base
+stationary; otherwise the base activates when a real arm limit is encountered. Changing the initial pose is therefore
+valid and is not required to preserve a particular base-activation pattern. Use `dof_limits={}` to disable all base
+DOFs when checking a fixed-base version of the same task.
+
+The cabinet tasks preserve their cabinet placement, handle/hinge definitions, and free virtual handle axes. Their
+deterministic goals are a `0.15 m` drawer pull and a `-pi/2` (90-degree) door opening. The real Piper-L and articulated
 cabinet DAE meshes are loaded directly from `python/assets`.
+
+The valve demo follows `~/py-workspace/rl_art_mj`: a six-spoke wheel centered at `(0.45, 0, 0.24)`, rotating about its
+local X axis, with a top-rim grasp radius of `0.1425 m`, `VirtualScrewOrder.NONE`, 16 trajectory points, and a fixed
+`pi` (180-degree) goal. Viser reconstructs the reference valve's hub, six spokes, rim, shaft, and mount from the same
+primitive dimensions.
 
 Optional task description parameters:
 ```cpp

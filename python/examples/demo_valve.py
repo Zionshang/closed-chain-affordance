@@ -1,4 +1,4 @@
-"""Open the cabinet door with Piper-L mounted on a floating base."""
+"""Turn the rl_art_mj six-spoke valve with floating-base Piper-L RM-CCA."""
 
 from __future__ import annotations
 
@@ -6,20 +6,17 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from cabinet_demo_common import (
     ARM_DOF,
-    CABINET_URDF,
     FloatingBaseConfig,
-    TRAJECTORY_POINTS,
     URDF,
-    cabinet_point,
     cca,
     load_piper,
     minimum_arm_limit_clearance,
     parse_args,
     planner_config,
-    rotate_about_z,
     robot_at_grasp,
     solve_grasp,
     validate_plan,
@@ -27,19 +24,22 @@ from cabinet_demo_common import (
 )
 
 
-CABINET_POSITION = (0.50, 0.0, 0.20)
-CABINET_YAW = math.pi
-DOOR_HINGE_LOCAL = (0.119816, -0.275279, 0.104384)
-DOOR_HANDLE_LOCAL = (0.165816, -0.025555, 0.165822)
-DOOR_HANDLE_AXIS = (0.0, 0.0, 1.0)
-DOOR_HINGE_AXIS = (0.0, 0.0, 1.0)
-DOOR_OPEN_ANGLE = -math.pi / 2
-GRASP_ROLL = 0.0
+# Definitions copied from rl_art_mj/tasks/manipulation/valve/assets.py and
+# valve/mdp/cca_trajectory.py.
+VALVE_CENTER = np.asarray((0.45, 0.0, 0.24))
+VALVE_AXIS = np.asarray((1.0, 0.0, 0.0))
+VALVE_GRASP_DIRECTION = np.asarray((0.0, 0.0, 1.0))
+VALVE_GRASP_RADIUS = 0.1425
+VALVE_RIM_TUBE_RADIUS = 0.0175
+VALVE_TARGET_ANGLE = math.pi
+VALVE_TRAJECTORY_POINTS = 16
+GRASP_ROLL = -math.pi / 2.0
+VALVE_HANDLE_AXIS = np.asarray((0.0, 1.0, 0.0))
 
 # Configure the floating base here, not through the CLI. Dictionary keys are
 # enabled relative DOFs; omitted keys ("rx" here) are fixed exactly at zero.
 FLOATING_BASE = FloatingBaseConfig(
-    initial_position=(0.0, 0.0, 0.0),
+    initial_position=(0.0, 0.0, 0.2),
     initial_rpy=(0.0, 0.0, 0.0),
     dof_limits={
         "px": (-0.60, 0.60),
@@ -58,25 +58,34 @@ class DemoResult:
     grasp_joints: np.ndarray
     initial_base_pose: np.ndarray
     base_config: FloatingBaseConfig
-    hinge_position: np.ndarray
+    center_position: np.ndarray
     handle_position: np.ndarray
-    open_angle: float
+    target_angle: float
     enable_joint_limits: bool
     enable_nullspace_planning: bool
 
 
-def door_task(
-    hinge_position: np.ndarray,
-    open_angle: float,
+def rotate_about_axis(
+    point: np.ndarray,
+    center: np.ndarray,
+    axis: np.ndarray,
+    angle: float,
+) -> np.ndarray:
+    axis = np.asarray(axis, dtype=float)
+    axis /= np.linalg.norm(axis)
+    return center + Rotation.from_rotvec(angle * axis).apply(point - center)
+
+
+def valve_task(
     base_config: FloatingBaseConfig = FLOATING_BASE,
 ) -> cca.TaskDescription:
     task = cca.TaskDescription()
     task.affordance_info.type = cca.ScrewType.ROTATION
-    task.affordance_info.axis = np.asarray(DOOR_HINGE_AXIS)
-    task.affordance_info.location = hinge_position
-    task.goal.affordance = open_angle
-    task.trajectory_density = TRAJECTORY_POINTS
-    task.vir_screw_order = cca.VirtualScrewOrder.Z
+    task.affordance_info.axis = VALVE_AXIS
+    task.affordance_info.location = VALVE_CENTER
+    task.goal.affordance = VALVE_TARGET_ANGLE
+    task.trajectory_density = VALVE_TRAJECTORY_POINTS
+    task.vir_screw_order = cca.VirtualScrewOrder.NONE
     task.reserve_mobility = base_config.make_description(0.10, 0.20)
     return task
 
@@ -88,8 +97,7 @@ def run_demo(
     base_config: FloatingBaseConfig = FLOATING_BASE,
 ) -> DemoResult:
     seed_robot, robot_config = load_piper()
-    hinge_position = cabinet_point(CABINET_POSITION, DOOR_HINGE_LOCAL)
-    handle_position = cabinet_point(CABINET_POSITION, DOOR_HANDLE_LOCAL)
+    handle_position = VALVE_CENTER + VALVE_GRASP_RADIUS * VALVE_GRASP_DIRECTION
     reserve_enabled = enable_joint_limits or enable_nullspace_planning
     initial_base_pose = base_config.initial_pose() if reserve_enabled else np.eye(4)
     grasp_joints = solve_grasp(
@@ -100,19 +108,19 @@ def run_demo(
         enable_joint_limits=enable_joint_limits,
         enable_nullspace_planning=enable_nullspace_planning,
     )
-    task = door_task(hinge_position, DOOR_OPEN_ANGLE, base_config)
+    task = valve_task(base_config)
     plan = cca.PlannerInterface(config).generate_joint_trajectory(robot, task)
     validate_plan(
         plan,
         robot,
         base_config,
-        maximum_points=TRAJECTORY_POINTS,
+        maximum_points=VALVE_TRAJECTORY_POINTS,
         reserve_enabled=reserve_enabled,
         enforce_arm_limits=enable_joint_limits,
     )
 
-    expected_final = rotate_about_z(
-        handle_position, hinge_position, DOOR_OPEN_ANGLE
+    expected_final = rotate_about_axis(
+        handle_position, VALVE_CENTER, VALVE_AXIS, VALVE_TARGET_ANGLE
     )
     tool_positions = world_tool_positions(robot, plan)
     assert np.linalg.norm(tool_positions[0] - handle_position) < 2e-4
@@ -124,9 +132,9 @@ def run_demo(
         grasp_joints=grasp_joints,
         initial_base_pose=initial_base_pose,
         base_config=base_config,
-        hinge_position=hinge_position,
+        center_position=VALVE_CENTER,
         handle_position=handle_position,
-        open_angle=DOOR_OPEN_ANGLE,
+        target_angle=VALVE_TARGET_ANGLE,
         enable_joint_limits=enable_joint_limits,
         enable_nullspace_planning=enable_nullspace_planning,
     )
@@ -135,8 +143,11 @@ def run_demo(
 def print_diagnostics(result: DemoResult) -> None:
     trajectory = np.asarray(result.plan.joint_trajectory)
     reserve = np.asarray(result.plan.reserve_trajectory)
-    expected_final = rotate_about_z(
-        result.handle_position, result.hinge_position, result.open_angle
+    expected_final = rotate_about_axis(
+        result.handle_position,
+        result.center_position,
+        VALVE_AXIS,
+        result.target_angle,
     )
     endpoint = world_tool_positions(result.robot, result.plan)[-1]
     status = (
@@ -147,7 +158,7 @@ def print_diagnostics(result: DemoResult) -> None:
     translation = np.linalg.norm(reserve[-1, :3]) if reserve.size else 0.0
     rotation = np.linalg.norm(reserve[-1, 3:]) if reserve.size else 0.0
     clearance = minimum_arm_limit_clearance(result.robot, result.plan)
-    print(f"door opening: {math.degrees(result.open_angle):.3f} deg; status: {status}")
+    print(f"valve turn: {math.degrees(result.target_angle):.3f} deg; status: {status}")
     print(
         f"joint limits={'on' if result.enable_joint_limits else 'off'}; "
         f"null-space={'on' if result.enable_nullspace_planning else 'off'}; "
@@ -163,7 +174,7 @@ def print_diagnostics(result: DemoResult) -> None:
 
 
 def main() -> None:
-    args = parse_args(__doc__, default_port=8080)
+    args = parse_args(__doc__, default_port=8082)
     result = run_demo(
         enable_joint_limits=args.joint_limits,
         enable_nullspace_planning=args.nullspace_planning,
@@ -171,19 +182,20 @@ def main() -> None:
     print_diagnostics(result)
 
     from visualizer import (
-        CabinetTaskScene,
         CabinetVisualizer,
         TrajectoryCase,
+        ValveTaskScene,
         VisualizationConfig,
     )
 
-    fractions = np.linspace(0.0, 1.0, 40)
+    fractions = np.linspace(0.0, 1.0, 65)
     motion_path = np.asarray(
         [
-            rotate_about_z(
+            rotate_about_axis(
                 result.handle_position,
-                result.hinge_position,
-                result.open_angle * fraction,
+                result.center_position,
+                VALVE_AXIS,
+                result.target_angle * fraction,
             )
             for fraction in fractions
         ]
@@ -194,23 +206,23 @@ def main() -> None:
         initial_base_pose=result.initial_base_pose,
         config=VisualizationConfig(port=args.port),
     ).show(
-        [TrajectoryCase("90° door", result.plan, (30, 210, 235))],
-        CabinetTaskScene(
-            urdf_path=CABINET_URDF,
-            cabinet_position=np.asarray(CABINET_POSITION),
-            cabinet_yaw=CABINET_YAW,
-            joint_name="door_joint_1",
-            joint_goal=result.open_angle,
+        [TrajectoryCase("180° valve", result.plan, (30, 210, 235))],
+        ValveTaskScene(
+            center_position=result.center_position,
+            rotation_axis=VALVE_AXIS,
+            joint_goal=result.target_angle,
             handle_position=result.handle_position,
-            handle_axis=np.asarray(DOOR_HANDLE_AXIS),
+            handle_axis=VALVE_HANDLE_AXIS,
             motion_path=motion_path,
+            grasp_radius=VALVE_GRASP_RADIUS,
+            rim_tube_radius=VALVE_RIM_TUBE_RADIUS,
         ),
         duration_s=args.duration,
         markdown=(
-            "The Piper-L arm uses the joint limits copied from its URDF when "
-            "joint-limit handling is enabled. Floating-base pose, enabled DOFs "
-            f"**{result.base_config.enabled_dofs}**, and bounds are configured "
-            "in this demo's `FLOATING_BASE` dictionary."
+            "This is the procedural six-spoke valve from **rl_art_mj**, with a "
+            "fixed **180°** target. The Piper-L arm uses its URDF limits. "
+            f"Floating-base DOFs **{result.base_config.enabled_dofs}** and bounds "
+            "are configured in this demo's `FLOATING_BASE` dictionary."
         ),
     )
 

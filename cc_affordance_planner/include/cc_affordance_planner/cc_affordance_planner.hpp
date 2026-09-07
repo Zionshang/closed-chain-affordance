@@ -155,7 +155,7 @@ struct PlannerConfig
     double closure_err_threshold_lin = 1e-5;
     int ik_max_itr = 200;
     UpdateMethod update_method = UpdateMethod::BEST;
-    bool enable_joint_limits = true;          ///< Enforce RM-CCA primary-coordinate bounds with an active set.
+    bool enable_joint_limits = true;          ///< Enforce arm joint bounds; reserve-coordinate bounds remain active.
     bool enable_nullspace_planning = true;    ///< Prefer stationary reserve mobility in the CCA task null space.
     double svd_relative_tolerance = 1e-8;       ///< Relative singular-value cutoff used by RM-CCA.
     double residual_mobility_tolerance = 1e-10; ///< Threshold for classifying a reserve correction as active.
