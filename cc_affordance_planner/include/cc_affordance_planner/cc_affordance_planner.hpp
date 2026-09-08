@@ -155,10 +155,19 @@ struct PlannerConfig
     double closure_err_threshold_lin = 1e-5;
     int ik_max_itr = 200;
     UpdateMethod update_method = UpdateMethod::BEST;
-    bool enable_joint_limits = true;          ///< Enforce arm joint bounds; reserve-coordinate bounds remain active.
-    bool enable_nullspace_planning = true;    ///< Prefer stationary reserve mobility in the CCA task null space.
+    bool enable_joint_limits = true; ///< Enforce effective arm bounds; reserve-coordinate bounds remain active.
+    bool enable_nullspace_planning = true; ///< Prefer stationary reserve mobility in the CCA task null space.
+    bool enable_capability_aware_planning = true; ///< Use the mobility metric instead of strict stationarity.
     double svd_relative_tolerance = 1e-8;       ///< Relative singular-value cutoff used by RM-CCA.
+    double svd_absolute_tolerance = 1e-8;       ///< Absolute singular-value cutoff used by RM-CCA.
     double residual_mobility_tolerance = 1e-10; ///< Threshold for classifying a reserve correction as active.
+    double soft_limit_ratio = 1.0;             ///< Active-set/barrier fraction of each finite URDF interval.
+    double arm_mobility_weight = 1.0;            ///< Nominal physical/free-arm coordinate metric weight.
+    double joint_limit_barrier_gain = 1.0;       ///< Joint-limit proximity barrier multiplier.
+    double joint_limit_barrier_epsilon = 1e-3;   ///< Positive regularizer in the proximity barrier.
+    double base_translation_weight = 400.0;      ///< Floating-base translation metric weight [m^-2 scale].
+    double base_rotation_weight = 25.0;          ///< Floating-base rotation metric weight [rad^-2 scale].
+    double closure_secondary_weight = 1.0;       ///< Metric weight for closure secondary coordinates.
     double joint_limit_margin = 1e-6;           ///< Inward margin applied to absolute arm joint limits.
     double joint_limit_tolerance = 1e-10;       ///< Numerical tolerance for active-set boundary detection.
 };
@@ -344,8 +353,17 @@ class CcAffordancePlanner
     int max_itr_l_;   // max interations for IK solver
     bool enable_joint_limits_;
     bool enable_nullspace_planning_;
+    bool enable_capability_aware_planning_;
     double svd_relative_tolerance_;
+    double svd_absolute_tolerance_;
     double residual_mobility_tolerance_;
+    double soft_limit_ratio_;
+    double arm_mobility_weight_;
+    double joint_limit_barrier_gain_;
+    double joint_limit_barrier_epsilon_;
+    double base_translation_weight_;
+    double base_rotation_weight_;
+    double closure_secondary_weight_;
     double joint_limit_margin_;
     double joint_limit_tolerance_;
     //--EOF Planner config parameters
@@ -366,6 +384,7 @@ class CcAffordancePlanner
                                                         const Eigen::VectorXd &theta_sd,
                                                         std::stop_token st);
     Eigen::VectorXd make_primary_start_guess() const;
+    Eigen::VectorXd make_primary_mobility_metric(const Eigen::VectorXd &theta_p) const;
     void append_trajectory_point(PlannerResult &result, const Eigen::VectorXd &closed_chain_point) const;
 
     /**

@@ -34,6 +34,7 @@ ARM_DOF = 6
 TRAJECTORY_POINTS = 12
 POSE_IK_ITERATIONS = 500
 FLOATING_BASE_DOF_NAMES = ("px", "py", "pz", "rx", "ry", "rz")
+JOINT_LIMIT_MARGIN = 1e-6
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,51 @@ class FloatingBaseConfig:
         return pose
 
 
+@dataclass(frozen=True)
+class CapabilityMetricConfig:
+    """Code-side weights for Capability-Aware RM-CCA (not CLI options)."""
+
+    arm_weight: float = 1.0
+    joint_limit_barrier_gain: float = 1.0
+    joint_limit_barrier_epsilon: float = 1e-3
+    base_translation_weight: float = 400.0
+    base_rotation_weight: float = 25.0
+    closure_secondary_weight: float = 1.0
+    svd_relative_tolerance: float = 1e-8
+    svd_absolute_tolerance: float = 1e-8
+
+    def __post_init__(self) -> None:
+        positive = np.asarray(
+            (
+                self.arm_weight,
+                self.joint_limit_barrier_epsilon,
+                self.base_translation_weight,
+                self.base_rotation_weight,
+                self.closure_secondary_weight,
+                self.svd_relative_tolerance,
+            ),
+            dtype=float,
+        )
+        nonnegative = np.asarray(
+            (self.joint_limit_barrier_gain, self.svd_absolute_tolerance),
+            dtype=float,
+        )
+        if not np.isfinite(positive).all() or np.any(positive <= 0.0):
+            raise ValueError(
+                "capability metric weights/epsilon and relative SVD "
+                "tolerance must be positive"
+            )
+        if not np.isfinite(nonnegative).all() or np.any(nonnegative < 0.0):
+            raise ValueError(
+                "barrier gain and absolute SVD tolerance must be non-negative"
+            )
+
+
+# Tune numerical behavior here; the command line intentionally exposes only
+# algorithm switches. Translation and rotation have separate physical scales.
+CAPABILITY_METRIC = CapabilityMetricConfig()
+
+
 def parse_args(description: str, default_port: int) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--port", type=int, default=default_port)
@@ -132,12 +178,36 @@ def parse_args(description: str, default_port: int) -> argparse.Namespace:
         help="Enable/disable reserve-stationarity null-space redistribution.",
     )
     parser.add_argument(
+        "--capability-aware-planning",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable/disable the configuration-dependent mobility metric.",
+    )
+    parser.add_argument(
         "--duration",
         type=float,
         default=None,
         help="Stop Viser after this many seconds; default runs until Ctrl+C.",
     )
     return parser.parse_args()
+
+
+def planning_mode_name(
+    enable_joint_limits: bool,
+    enable_nullspace_planning: bool,
+    enable_capability_aware_planning: bool,
+) -> str:
+    """Return the effective mode after applying planner switch precedence."""
+    if enable_capability_aware_planning:
+        allocation = "Capability-Aware RM-CCA"
+    elif enable_nullspace_planning:
+        allocation = "strict null-space RM-CCA"
+    elif enable_joint_limits:
+        allocation = "bound-aware whole-body CCA"
+    else:
+        return "legacy fixed-base CCA"
+    suffix = " with arm active set" if enable_joint_limits else ""
+    return allocation + suffix
 
 
 def cabinet_point(
@@ -182,6 +252,9 @@ def planner_config(
     *,
     enable_joint_limits: bool = True,
     enable_nullspace_planning: bool = True,
+    enable_capability_aware_planning: bool = True,
+    soft_limit_ratio: float = 1.0,
+    mobility_metric: CapabilityMetricConfig = CAPABILITY_METRIC,
 ) -> cca.PlannerConfig:
     config = cca.PlannerConfig()
     config.update_method = cca.UpdateMethod.BEST
@@ -190,10 +263,36 @@ def planner_config(
     config.closure_err_threshold_ang = 1e-4
     config.closure_err_threshold_lin = 1e-4
     config.residual_mobility_tolerance = 1e-10
-    config.joint_limit_margin = 1e-6
+    config.svd_relative_tolerance = mobility_metric.svd_relative_tolerance
+    config.svd_absolute_tolerance = mobility_metric.svd_absolute_tolerance
+    config.soft_limit_ratio = soft_limit_ratio
+    config.arm_mobility_weight = mobility_metric.arm_weight
+    config.joint_limit_barrier_gain = mobility_metric.joint_limit_barrier_gain
+    config.joint_limit_barrier_epsilon = mobility_metric.joint_limit_barrier_epsilon
+    config.base_translation_weight = mobility_metric.base_translation_weight
+    config.base_rotation_weight = mobility_metric.base_rotation_weight
+    config.closure_secondary_weight = mobility_metric.closure_secondary_weight
+    config.joint_limit_margin = JOINT_LIMIT_MARGIN
     config.enable_joint_limits = enable_joint_limits
     config.enable_nullspace_planning = enable_nullspace_planning
+    config.enable_capability_aware_planning = enable_capability_aware_planning
     return config
+
+
+def softened_joint_limits(
+    robot: cca.RobotDescription, soft_limit_ratio: float = 1.0
+) -> tuple[np.ndarray, np.ndarray]:
+    """Contract every finite URDF interval about its center."""
+    if not np.isfinite(soft_limit_ratio) or not 0.0 < soft_limit_ratio <= 1.0:
+        raise ValueError("soft_limit_ratio must be in the range (0, 1]")
+    lower = np.asarray(robot.joint_lower_limits).copy()
+    upper = np.asarray(robot.joint_upper_limits).copy()
+    finite = np.isfinite(lower) & np.isfinite(upper)
+    center = lower[finite] + 0.5 * (upper[finite] - lower[finite])
+    half_range = 0.5 * soft_limit_ratio * (upper[finite] - lower[finite])
+    lower[finite] = center - half_range
+    upper[finite] = center + half_range
+    return lower, upper
 
 
 def base_pose_trajectory(result: cca.PlannerResult) -> np.ndarray:
@@ -264,6 +363,7 @@ def validate_plan(
     maximum_points: int,
     reserve_enabled: bool,
     enforce_arm_limits: bool,
+    soft_limit_ratio: float = 1.0,
 ) -> np.ndarray:
     """Validate URDF arm limits and the configured floating-base limits."""
     trajectory = np.asarray(result.joint_trajectory)
@@ -277,8 +377,14 @@ def validate_plan(
     assert bool(np.isfinite(trajectory).all())
     if enforce_arm_limits:
         arm = trajectory[:, :ARM_DOF]
-        lower_arm = np.asarray(robot.joint_lower_limits)
-        upper_arm = np.asarray(robot.joint_upper_limits)
+        urdf_lower = np.asarray(robot.joint_lower_limits)
+        urdf_upper = np.asarray(robot.joint_upper_limits)
+        assert np.all(arm >= urdf_lower[None, :] - 1e-9)
+        assert np.all(arm <= urdf_upper[None, :] + 1e-9)
+        lower_arm, upper_arm = softened_joint_limits(robot, soft_limit_ratio)
+        start = np.asarray(robot.joint_states)
+        lower_arm = np.minimum(start, lower_arm + JOINT_LIMIT_MARGIN)
+        upper_arm = np.maximum(start, upper_arm - JOINT_LIMIT_MARGIN)
         assert np.all(arm >= lower_arm[None, :] - 1e-9)
         assert np.all(arm <= upper_arm[None, :] + 1e-9)
 
@@ -305,12 +411,15 @@ def validate_plan(
 
 
 def minimum_arm_limit_clearance(
-    robot: cca.RobotDescription, result: cca.PlannerResult
+    robot: cca.RobotDescription,
+    result: cca.PlannerResult,
+    soft_limit_ratio: float = 1.0,
 ) -> float:
-    """Return the minimum signed distance to a real URDF arm limit."""
+    """Return the minimum signed distance to the configured soft arm limits."""
     arm = np.asarray(result.joint_trajectory)[:, :ARM_DOF]
-    lower = np.asarray(robot.joint_lower_limits)[None, :]
-    upper = np.asarray(robot.joint_upper_limits)[None, :]
+    lower, upper = softened_joint_limits(robot, soft_limit_ratio)
+    lower = lower[None, :]
+    upper = upper[None, :]
     return float(np.min(np.minimum(arm - lower, upper - arm)))
 
 

@@ -16,6 +16,7 @@ from cabinet_demo_common import (
     load_piper,
     minimum_arm_limit_clearance,
     parse_args,
+    planning_mode_name,
     planner_config,
     robot_at_grasp,
     solve_grasp,
@@ -35,6 +36,7 @@ VALVE_TARGET_ANGLE = math.pi
 VALVE_TRAJECTORY_POINTS = 16
 GRASP_ROLL = -math.pi / 2.0
 VALVE_HANDLE_AXIS = np.asarray((0.0, 1.0, 0.0))
+SOFT_LIMIT_RATIO = 0.8
 
 # Configure the floating base here, not through the CLI. Dictionary keys are
 # enabled relative DOFs; omitted keys ("rx" here) are fixed exactly at zero.
@@ -63,6 +65,8 @@ class DemoResult:
     target_angle: float
     enable_joint_limits: bool
     enable_nullspace_planning: bool
+    enable_capability_aware_planning: bool
+    soft_limit_ratio: float
 
 
 def rotate_about_axis(
@@ -94,11 +98,17 @@ def run_demo(
     *,
     enable_joint_limits: bool = True,
     enable_nullspace_planning: bool = True,
+    enable_capability_aware_planning: bool = True,
     base_config: FloatingBaseConfig = FLOATING_BASE,
 ) -> DemoResult:
     seed_robot, robot_config = load_piper()
     handle_position = VALVE_CENTER + VALVE_GRASP_RADIUS * VALVE_GRASP_DIRECTION
-    reserve_enabled = enable_joint_limits or enable_nullspace_planning
+    reserve_enabled = (
+        enable_joint_limits
+        or enable_nullspace_planning
+        or enable_capability_aware_planning
+    )
+    effective_soft_limit_ratio = SOFT_LIMIT_RATIO if enable_joint_limits else 1.0
     initial_base_pose = base_config.initial_pose() if reserve_enabled else np.eye(4)
     grasp_joints = solve_grasp(
         seed_robot, handle_position, GRASP_ROLL, initial_base_pose
@@ -107,6 +117,8 @@ def run_demo(
     config = planner_config(
         enable_joint_limits=enable_joint_limits,
         enable_nullspace_planning=enable_nullspace_planning,
+        enable_capability_aware_planning=enable_capability_aware_planning,
+        soft_limit_ratio=effective_soft_limit_ratio,
     )
     task = valve_task(base_config)
     plan = cca.PlannerInterface(config).generate_joint_trajectory(robot, task)
@@ -117,6 +129,7 @@ def run_demo(
         maximum_points=VALVE_TRAJECTORY_POINTS,
         reserve_enabled=reserve_enabled,
         enforce_arm_limits=enable_joint_limits,
+        soft_limit_ratio=effective_soft_limit_ratio,
     )
 
     expected_final = rotate_about_axis(
@@ -137,6 +150,8 @@ def run_demo(
         target_angle=VALVE_TARGET_ANGLE,
         enable_joint_limits=enable_joint_limits,
         enable_nullspace_planning=enable_nullspace_planning,
+        enable_capability_aware_planning=enable_capability_aware_planning,
+        soft_limit_ratio=effective_soft_limit_ratio,
     )
 
 
@@ -157,16 +172,20 @@ def print_diagnostics(result: DemoResult) -> None:
     )
     translation = np.linalg.norm(reserve[-1, :3]) if reserve.size else 0.0
     rotation = np.linalg.norm(reserve[-1, 3:]) if reserve.size else 0.0
-    clearance = minimum_arm_limit_clearance(result.robot, result.plan)
+    clearance = minimum_arm_limit_clearance(
+        result.robot, result.plan, result.soft_limit_ratio
+    )
     print(f"valve turn: {math.degrees(result.target_angle):.3f} deg; status: {status}")
     print(
         f"joint limits={'on' if result.enable_joint_limits else 'off'}; "
         f"null-space={'on' if result.enable_nullspace_planning else 'off'}; "
+        f"capability-aware={'on' if result.enable_capability_aware_planning else 'off'}; "
+        f"soft ratio={result.soft_limit_ratio:.2f}; "
         f"base DOFs={result.base_config.enabled_dofs}"
     )
     print(
         f"base delta: {translation:.3e} m / {rotation:.3e} rad; "
-        f"minimum URDF-limit clearance: {clearance:.3e} rad; "
+        f"minimum nominal soft-limit clearance: {clearance:.3e} rad; "
         f"max arm delta: "
         f"{np.max(np.abs(trajectory[:, :ARM_DOF] - result.grasp_joints)):.3e} rad; "
         f"endpoint error: {np.linalg.norm(endpoint - expected_final):.3e} m"
@@ -178,8 +197,14 @@ def main() -> None:
     result = run_demo(
         enable_joint_limits=args.joint_limits,
         enable_nullspace_planning=args.nullspace_planning,
+        enable_capability_aware_planning=args.capability_aware_planning,
     )
     print_diagnostics(result)
+    mode_name = planning_mode_name(
+        result.enable_joint_limits,
+        result.enable_nullspace_planning,
+        result.enable_capability_aware_planning,
+    )
 
     from visualizer import (
         CabinetVisualizer,
@@ -219,6 +244,8 @@ def main() -> None:
         ),
         duration_s=args.duration,
         markdown=(
+            f"Planning mode: **{mode_name}**; "
+            f"soft-limit ratio: **{result.soft_limit_ratio:.2f}**. "
             "This is the procedural six-spoke valve from **rl_art_mj**, with a "
             "fixed **180°** target. The Piper-L arm uses its URDF limits. "
             f"Floating-base DOFs **{result.base_config.enabled_dofs}** and bounds "

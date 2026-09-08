@@ -47,6 +47,13 @@ void test_hierarchy_keeps_base_stationary()
             "Hierarchy test: null-space redistribution did not transfer motion to the arm.");
 }
 
+void test_capability_aware_is_default()
+{
+    const cc_affordance_planner::PlannerConfig config;
+    require(config.enable_capability_aware_planning,
+            "Default-mode test: Capability-Aware RM-CCA is not enabled by default.");
+}
+
 void test_projected_numerical_zero_is_truncated()
 {
     const Eigen::Matrix2d numerical_zero =
@@ -55,6 +62,76 @@ void test_projected_numerical_zero_is_truncated()
         cc_affordance_planner::pseudo_inverse_svd(numerical_zero, 1e-8);
     require(pseudoinverse.norm() == 0.0,
             "SVD-floor test: projected floating-point noise became a false mobility direction.");
+}
+
+void test_absolute_svd_cutoff_is_independent()
+{
+    Eigen::MatrixXd small_matrix(1, 1);
+    small_matrix << 1e-9;
+    const Eigen::MatrixXd truncated =
+        cc_affordance_planner::pseudo_inverse_svd(small_matrix, 1e-12, 1e-8);
+    const Eigen::MatrixXd retained =
+        cc_affordance_planner::pseudo_inverse_svd(small_matrix, 1e-12, 1e-12);
+
+    require(truncated(0, 0) == 0.0,
+            "Absolute-SVD test: a singular value below the absolute cutoff was retained.");
+    require(std::abs(retained(0, 0) - 1e9) < 1.0,
+            "Absolute-SVD test: a singular value above both cutoffs was discarded.");
+}
+
+void test_metric_prefers_healthy_arm_continuously()
+{
+    Eigen::MatrixXd jacobian(1, 2);
+    jacobian << 1.0, 1.0;
+    const Eigen::VectorXd error = Eigen::VectorXd::Ones(1);
+    const Eigen::Vector2d metric(1.0, 100.0);
+    const auto step = cc_affordance_planner::compute_metric_weighted_step(
+        jacobian, error, metric, {1}, 1e-12, 1e-12);
+
+    require(step.task_residual.norm() < 1e-12,
+            "Metric allocation test: the weighted correction did not preserve the CCA task.");
+    require(std::abs(step.delta(0) - 100.0 / 101.0) < 1e-12 &&
+                std::abs(step.delta(1) - 1.0 / 101.0) < 1e-12,
+            "Metric allocation test: the expensive base was not smoothly de-emphasized.");
+}
+
+void test_metric_uses_base_when_arm_mobility_collapses()
+{
+    const Eigen::Vector2d metric(1.0, 100.0);
+    const Eigen::VectorXd error = Eigen::VectorXd::Ones(1);
+    Eigen::MatrixXd healthy_jacobian(1, 2);
+    healthy_jacobian << 1.0, 1.0;
+    Eigen::MatrixXd singular_jacobian(1, 2);
+    singular_jacobian << 1e-3, 1.0;
+
+    const auto healthy = cc_affordance_planner::compute_metric_weighted_step(
+        healthy_jacobian, error, metric, {1}, 1e-12, 1e-12);
+    const auto singular = cc_affordance_planner::compute_metric_weighted_step(
+        singular_jacobian, error, metric, {1}, 1e-12, 1e-12);
+
+    require(healthy.task_residual.norm() < 1e-12 && singular.task_residual.norm() < 1e-12,
+            "Singular-mobility test: a weighted correction did not preserve the task.");
+    require(std::abs(healthy.base_delta(0)) < 0.02 && std::abs(singular.base_delta(0)) > 0.99,
+            "Singular-mobility test: base participation did not rise as arm task mobility collapsed.");
+}
+
+void test_metric_active_set_keeps_hard_feasibility()
+{
+    Eigen::MatrixXd jacobian(1, 2);
+    jacobian << 1.0, 1.0;
+    const Eigen::VectorXd error = Eigen::VectorXd::Ones(1);
+    const Eigen::Vector2d state(0.9, 0.0);
+    const Eigen::Vector2d lower(-1.0, -10.0);
+    const Eigen::Vector2d upper(1.0, 10.0);
+    const Eigen::Vector2d metric(1.0, 100.0);
+    const auto step = cc_affordance_planner::compute_feasible_metric_step(
+        jacobian, error, state, lower, upper, metric, {0}, {1}, 1e-12, 1e-12, 1e-12);
+
+    require(step.task_residual.norm() < 1e-12 && std::abs(step.delta(0) - 0.1) < 1e-12 &&
+                std::abs(step.delta(1) - 0.9) < 1e-12,
+            "Metric active-set test: clipping/re-solve did not preserve both feasibility and task correction.");
+    require(step.frozen_variable_indices == std::vector<size_t>{0} && step.active_arm_dof_count == 0,
+            "Metric active-set test: the first outward arm boundary was not frozen.");
 }
 
 void test_bound_exhaustion_keeps_unavoidable_base_motion()
@@ -145,6 +222,23 @@ void test_closure_uses_same_hierarchy()
             "Closure hierarchy test: base moved despite an arm/secondary closure solution.");
 }
 
+void test_closure_uses_same_metric()
+{
+    Eigen::MatrixXd closure_jacobian(1, 3);
+    closure_jacobian << 1.0, 1.0, -1.0;
+    const Eigen::VectorXd closure_error = Eigen::VectorXd::Constant(1, 0.3);
+    const Eigen::Vector3d metric(1.0, 100.0, 1.0);
+    const auto step = cc_affordance_planner::compute_feasible_metric_step(
+        closure_jacobian, closure_error, Eigen::Vector3d::Zero(),
+        Eigen::Vector3d::Constant(-10.0), Eigen::Vector3d::Constant(10.0), metric,
+        {0}, {1}, 1e-12, 1e-12, 1e-12);
+
+    require(step.task_residual.norm() < 1e-12,
+            "Closure metric test: the closure correction was not preserved.");
+    require(std::abs(step.base_delta(0)) < 0.01 * std::abs(closure_error(0)),
+            "Closure metric test: closure recovery ignored the expensive-base metric.");
+}
+
 void test_finite_rotation_reserve_closure()
 {
     // A numerically locked dummy arm holds a point away from a Z hinge. The
@@ -171,6 +265,7 @@ void test_finite_rotation_reserve_closure()
         affordance_util::make_floating_base_reserve_description(Eigen::Matrix4d::Identity(), 0.1, 0.2);
 
     cc_affordance_planner::PlannerConfig config;
+    config.enable_capability_aware_planning = false;
     config.accuracy = 0.001;
     config.ik_max_itr = 5000;
     config.closure_err_threshold_ang = 1e-4;
@@ -195,6 +290,76 @@ void test_finite_rotation_reserve_closure()
         (result.reserve_pose_trajectory.back() * robot.M).block<3, 1>(0, 3);
     require((actual - expected).norm() < 3e-4,
             "Finite-rotation case: floating base did not keep the point on the hinge arc.");
+}
+
+void test_soft_limit_and_capability_allocation()
+{
+    affordance_util::RobotDescription robot;
+    robot.slist = Eigen::MatrixXd::Zero(6, 1);
+    robot.slist(2, 0) = 1.0;
+    robot.M = Eigen::Matrix4d::Identity();
+    robot.M(0, 3) = 0.5;
+    robot.joint_states = Eigen::VectorXd::Zero(1);
+    robot.joint_lower_limits = Eigen::VectorXd::Constant(1, -1.0);
+    robot.joint_upper_limits = Eigen::VectorXd::Constant(1, 1.0);
+
+    cc_affordance_planner::TaskDescription task;
+    task.affordance_info.type = affordance_util::ScrewType::ROTATION;
+    task.affordance_info.screw = robot.slist;
+    task.goal.affordance = 0.8;
+    task.trajectory_density = 12;
+    task.vir_screw_order = affordance_util::VirtualScrewOrder::NONE;
+    task.reserve_mobility =
+        affordance_util::make_floating_base_reserve_description(Eigen::Matrix4d::Identity(), 0.1, 0.2);
+
+    cc_affordance_planner::PlannerConfig full_limit_config;
+    full_limit_config.enable_capability_aware_planning = false;
+    full_limit_config.update_method = cc_affordance_planner::UpdateMethod::INVERSE;
+    full_limit_config.accuracy = 0.001;
+    full_limit_config.ik_max_itr = 5000;
+    const auto full_limit = cc_affordance_planner::CcAffordancePlannerInterface(full_limit_config)
+                                .generate_joint_trajectory(robot, task);
+
+    auto soft_limit_config = full_limit_config;
+    soft_limit_config.soft_limit_ratio = 0.5;
+    const auto soft_limit = cc_affordance_planner::CcAffordancePlannerInterface(soft_limit_config)
+                                .generate_joint_trajectory(robot, task);
+
+    auto capability_config = soft_limit_config;
+    capability_config.enable_capability_aware_planning = true;
+    const auto capability = cc_affordance_planner::CcAffordancePlannerInterface(capability_config)
+                                .generate_joint_trajectory(robot, task);
+
+    auto no_limit_capability_config = capability_config;
+    no_limit_capability_config.enable_joint_limits = false;
+    const auto no_limit_soft_ratio = cc_affordance_planner::CcAffordancePlannerInterface(no_limit_capability_config)
+                                         .generate_joint_trajectory(robot, task);
+    no_limit_capability_config.soft_limit_ratio = 1.0;
+    const auto no_limit_full_ratio = cc_affordance_planner::CcAffordancePlannerInterface(no_limit_capability_config)
+                                         .generate_joint_trajectory(robot, task);
+
+    require(full_limit.success && soft_limit.success && capability.success,
+            "Soft-limit integration test: a redundant rotation trajectory did not complete.");
+    require(std::abs(full_limit.joint_trajectory.back()(0) - 0.8) < 2e-4 &&
+                std::abs(full_limit.reserve_trajectory.back()(5)) < 1e-10,
+            "Soft-limit integration test: ratio 1.0 did not retain the strict arm-only solution.");
+    require(std::abs(soft_limit.joint_trajectory.back()(0) - 0.5) < 2e-4 &&
+                std::abs(soft_limit.reserve_trajectory.back()(5) - 0.3) < 2e-4,
+            "Soft-limit integration test: the active set did not use the contracted interval.");
+    require(capability.reserve_trajectory.back()(5) > soft_limit.reserve_trajectory.front()(5) &&
+                capability.reserve_trajectory.back()(5) > 0.30 &&
+                capability.joint_trajectory.back()(0) < 0.5,
+            "Capability integration test: base participation did not grow before the soft boundary.");
+    for (size_t i = 1; i < capability.reserve_trajectory.size(); ++i)
+    {
+        require(capability.reserve_trajectory[i](5) >= capability.reserve_trajectory[i - 1](5) - 1e-10,
+                "Capability integration test: base allocation switched discontinuously backward.");
+    }
+    require((no_limit_soft_ratio.joint_trajectory.back().array() ==
+             no_limit_full_ratio.joint_trajectory.back().array()).all() &&
+                (no_limit_soft_ratio.reserve_trajectory.back().array() ==
+                 no_limit_full_ratio.reserve_trajectory.back().array()).all(),
+            "Limit-ablation test: soft_limit_ratio still affected capability allocation with limits disabled.");
 }
 
 affordance_util::RobotDescription make_kinova_description()
@@ -243,6 +408,7 @@ void test_disabled_extensions_are_exactly_legacy_cca()
     config.update_method = cc_affordance_planner::UpdateMethod::INVERSE;
     config.enable_joint_limits = false;
     config.enable_nullspace_planning = false;
+    config.enable_capability_aware_planning = false;
 
     const auto legacy =
         cc_affordance_planner::CcAffordancePlannerInterface(config).generate_joint_trajectory(robot, legacy_task);
@@ -271,6 +437,7 @@ void test_extensions_can_be_switched_independently()
     const auto task = make_rotation_task(robot, 0.02, 3);
 
     cc_affordance_planner::PlannerConfig no_nullspace_config;
+    no_nullspace_config.enable_capability_aware_planning = false;
     no_nullspace_config.update_method = cc_affordance_planner::UpdateMethod::INVERSE;
     no_nullspace_config.enable_joint_limits = true;
     no_nullspace_config.enable_nullspace_planning = false;
@@ -283,6 +450,7 @@ void test_extensions_can_be_switched_independently()
     tightly_limited_robot.joint_lower_limits = Eigen::VectorXd::Constant(7, -2e-5);
     tightly_limited_robot.joint_upper_limits = Eigen::VectorXd::Constant(7, 2e-5);
     cc_affordance_planner::PlannerConfig no_limits_config;
+    no_limits_config.enable_capability_aware_planning = false;
     no_limits_config.update_method = cc_affordance_planner::UpdateMethod::INVERSE;
     no_limits_config.enable_joint_limits = false;
     no_limits_config.enable_nullspace_planning = true;
@@ -299,6 +467,7 @@ void test_extensions_can_be_switched_independently()
 void test_kinova_integration()
 {
     cc_affordance_planner::PlannerConfig config;
+    config.enable_capability_aware_planning = false;
     config.update_method = cc_affordance_planner::UpdateMethod::BEST; // RM-CCA must force inverse-only execution.
     config.accuracy = 0.01;
     config.ik_max_itr = 500;
@@ -363,13 +532,20 @@ int main()
     try
     {
         test_hierarchy_keeps_base_stationary();
+        test_capability_aware_is_default();
         test_projected_numerical_zero_is_truncated();
+        test_absolute_svd_cutoff_is_independent();
+        test_metric_prefers_healthy_arm_continuously();
+        test_metric_uses_base_when_arm_mobility_collapses();
+        test_metric_active_set_keeps_hard_feasibility();
         test_bound_exhaustion_keeps_unavoidable_base_motion();
         test_boundary_joint_reactivates_inward();
         test_zero_width_bound_disables_reserve_dof();
         test_rank_loss_keeps_only_unavoidable_base_motion();
         test_closure_uses_same_hierarchy();
+        test_closure_uses_same_metric();
         test_finite_rotation_reserve_closure();
+        test_soft_limit_and_capability_allocation();
         test_disabled_extensions_are_exactly_legacy_cca();
         test_extensions_can_be_switched_independently();
         test_kinova_integration();

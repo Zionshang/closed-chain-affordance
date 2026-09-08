@@ -189,23 +189,41 @@ plannerConfig.ik_max_itr = 200; // Limit for the number of iterations for the cl
 
 ##### Reserve-Mobility CCA (RM-CCA)
 
-RM-CCA uses one strict task hierarchy throughout every Newton iteration:
-
-1. complete the original CCA correction `Jc * dx = e`;
-2. keep a floating base (or another reserve chain) stationary inside the primary-task null space.
-
-With `dx0 = Jc^+ e`, `Nc = I - Jc^+ Jc`, and `B` selecting reserve coordinates, the correction is
+The planner offers two reserve-mobility allocation methods. The existing strict null-space method remains available.
+It first completes the CCA correction `Jc * dx = e`, then keeps the floating base stationary in the task null space.
+With `dx0 = Jc^+ e`, `Nc = I - Jc^+ Jc`, and `B` selecting reserve coordinates, it uses
 
 ```text
 dx = dx0 - Nc (B Nc)^+ B dx0.
 ```
 
-Therefore, whenever an arm-only solution exists, the base correction is zero exactly (up to floating-point error).
-When joint bounds or truncated-SVD rank loss remove feasible arm directions, the same expression is recomputed over
-the remaining feasible variables and retains only the base motion that can no longer be eliminated. Bound handling is
-direction-aware: a joint is frozen only for the current active-set solve and can reactivate inward on the next Newton
-iteration. Closure correction uses the identical hierarchy and preserves the CCA secondary state already advanced by
-the main Newton step. There is no arm/base phase switch, QP, weighting cost, or optimizer.
+This gives exact base stationarity whenever the arm has a feasible solution. The new Capability-Aware RM-CCA mode
+instead solves one state-dependent metric inverse:
+
+```text
+G(q) = diag(Ga(q), Gb)
+dx   = G^-1 Jc^T (Jc G^-1 Jc^T)^+ e
+```
+
+`Gb = diag(lambda_t, lambda_t, lambda_t, lambda_r, lambda_r, lambda_r)` makes base translation and rotation expensive
+on their own physical scales. Each finite arm joint has
+
+```text
+r_i = (q_i - q_mid_i) / ((q_max_i - q_min_i) / 2)
+w_i = w_a0 + lambda_l r_i^2 / (1 - r_i^2 + epsilon)^2.
+```
+
+The implementation evaluates the weighted inverse through Jacobian whitening, avoiding normal-equation inversion.
+When the arm is healthy, its lower metric cost makes it dominate. Near a limit, `Ga(q)` rises continuously; near an
+arm singularity, the arm block of `Jc` loses task mobility. Either effect makes the expensive base participate
+smoothly without an activation gate, QP, or MPC. Finite closure recovery uses the same block metric
+`diag(Ga(q), Gb, Gs)`, so it cannot silently revert to an unweighted base-heavy correction.
+
+Both methods retain the direction-aware active set. A correction is clipped at the first configured feasibility
+boundary, frozen only for that active-set solve, and re-solved over the remaining DoFs. Every new Newton iteration
+reactivates the joint, allowing immediate inward motion. Pseudoinverses use the independent cutoff
+`max(svd_absolute_tolerance, svd_relative_tolerance * sigma_max)`. The default absolute value `1e-8` preserves the
+former RM-CCA numerical floor while making it independently tunable.
 
 ```cpp
 // Prefer this helper after robot_builder(): it copies URDF/YAML limits into RobotDescription.
@@ -225,22 +243,42 @@ task_description.reserve_mobility =
 cc_affordance_planner::PlannerConfig config;
 config.enable_joint_limits = true;
 config.enable_nullspace_planning = true;
+config.enable_capability_aware_planning = true; // Select the metric method; takes precedence over strict null-space.
 config.svd_relative_tolerance = 1e-8;
+config.svd_absolute_tolerance = 1e-8;
 config.residual_mobility_tolerance = 1e-10;
+config.soft_limit_ratio = 0.8; // Central 80% of each finite URDF interval is the effective planning interval.
+config.arm_mobility_weight = 1.0;
+config.joint_limit_barrier_gain = 1.0;
+config.joint_limit_barrier_epsilon = 1e-3;
+config.base_translation_weight = 400.0;
+config.base_rotation_weight = 25.0;
+config.closure_secondary_weight = 1.0;
 config.joint_limit_margin = 1e-6;
 
 cc_affordance_planner::CcAffordancePlannerInterface planner(config);
 auto result = planner.generate_joint_trajectory(robot_description, task_description);
 ```
 
-The two RM extensions can be switched independently. Both default to `true`, preserving the full RM-CCA behavior:
+The three switches have the following precedence:
 
-| `enable_joint_limits` | `enable_nullspace_planning` | Behavior |
-|---|---|---|
-| `true` | `true` | Full bound-aware RM-CCA: arm first, reserve motion after feasible null-space exhaustion. |
-| `true` | `false` | Bound-aware whole-body pseudoinverse; no secondary base-stationarity objective. |
-| `false` | `true` | Null-space redistribution without arm joint-limit enforcement; configured reserve-coordinate limits remain active. |
-| `false` | `false` | Exact legacy mode: the reserve chain is ignored and the original fixed-base CCA model, solver selection, and trajectory conversion paths are used. |
+| Switch configuration | Behavior |
+|---|---|
+| `enable_capability_aware_planning=true` | Capability-aware metric allocation; this takes precedence over `enable_nullspace_planning`. |
+| capability-aware off, `enable_nullspace_planning=true` | Existing strict CCA-first/base-stationarity method. |
+| only `enable_joint_limits=true` | Bound-aware whole-body ordinary pseudoinverse. |
+| all three switches `false` | Exact legacy fixed-base CCA; the attached reserve chain is ignored. |
+
+All three switches default to `true`. Because capability-aware allocation has precedence, it is the effective default
+algorithm. Disable only that switch to return to the existing strict null-space method.
+
+`enable_joint_limits` independently controls both the arm proximity barrier and arm active-set enforcement. Disabling
+it provides a clean limit-handling ablation while retaining Jacobian-driven singularity allocation in capability mode.
+Reserve-coordinate limits always remain active whenever an RM method is in use. `soft_limit_ratio` defaults to `1.0`;
+values below one contract each finite URDF interval about its center for both the barrier and active set. If the
+supplied initial state is already outside that soft interval but still inside the URDF interval, the initial state
+remains admissible and only inward motion is encouraged/allowed. The original URDF bounds are never enlarged or
+overwritten.
 
 Whenever at least one extension is enabled together with reserve mobility, the planner uses its pseudoinverse path and
 does not start the transpose thread, even if `update_method` is `BEST`. `result.joint_trajectory` retains the
@@ -283,18 +321,26 @@ python python/examples/demo_cabinet_door.py
 python python/examples/demo_valve.py
 ```
 
-Both switches are also available directly in every example through Python's paired boolean flags:
+All algorithm selections are available directly in every example through paired boolean flags. Numerical metric and
+floating-base values remain code-side:
 
 ```bash
-# Full RM-CCA (both are on by default)
+# Default: Capability-Aware RM-CCA
 python python/examples/demo_cabinet_drawer.py
 
-# Independent ablations
-python python/examples/demo_cabinet_drawer.py --no-nullspace-planning
+# Existing strict null-space RM-CCA
+python python/examples/demo_cabinet_drawer.py --no-capability-aware-planning
+
+# Capability metric without arm limit barrier/active set
 python python/examples/demo_cabinet_drawer.py --no-joint-limits
 
-# Original fixed-base closed-chain-affordance behavior
-python python/examples/demo_cabinet_drawer.py --no-joint-limits --no-nullspace-planning
+# Bound-aware ordinary whole-body pseudoinverse
+python python/examples/demo_cabinet_drawer.py \
+  --no-capability-aware-planning --no-nullspace-planning
+
+# Original fixed-base closed-chain-affordance behavior: all three switches off
+python python/examples/demo_cabinet_drawer.py \
+  --no-joint-limits --no-nullspace-planning --no-capability-aware-planning
 ```
 
 Door uses `localhost:8080`, drawer uses `localhost:8081`, and valve uses `localhost:8082`. Use `--port` to override the
@@ -305,7 +351,7 @@ the task constants:
 
 ```python
 FLOATING_BASE = FloatingBaseConfig(
-    initial_position=(0.25, 0.0, 0.0),
+    initial_position=(0.0, 0.0, 0.0),
     initial_rpy=(0.0, 0.0, 0.0),
     dof_limits={
         "px": (-0.60, 0.60),
@@ -323,13 +369,29 @@ key is disabled by assigning that reserve coordinate the exact bound `[0, 0]`. T
 `px py pz ry rz` and fixes `rx`. Every enabled interval must contain zero. Initial orientation uses fixed-axis RPY in
 radians and is composed as `Rz @ Ry @ Rx`. The Viser robot root and base path include this initial pose.
 
-No artificial arm operating envelope is used. In the default mode, all six Piper-L lower and upper limits are copied
-unchanged from `piper_l_fixed_gripper.urdf` and checked along every trajectory. The `--no-joint-limits` option exists
-only as the explicit algorithm ablation described above. Whether the base moves depends on the configured initial
-mounting pose: if the arm can complete the task inside its URDF limits, strict null-space planning keeps the base
-stationary; otherwise the base activates when a real arm limit is encountered. Changing the initial pose is therefore
-valid and is not required to preserve a particular base-activation pattern. Use `dof_limits={}` to disable all base
-DOFs when checking a fixed-base version of the same task.
+All six Piper-L lower and upper limits are copied unchanged from `piper_l_fixed_gripper.urdf`; the robot description is
+never assigned a fabricated workspace. The demos set `SOFT_LIMIT_RATIO = 0.8`, so limit-aware planning uses the central
+80% as its conservative effective interval while still validating the original URDF hard bounds. Set it to `1.0` to
+use the complete URDF interval. In strict null-space mode, an arm-feasible motion keeps the base stationary; in
+capability-aware mode, base motion rises continuously as joint-limit proximity or differential arm capability gets
+worse. Changing the initial pose therefore changes the allocation naturally and is not required to preserve a fixed
+activation pattern. Use `dof_limits={}` to disable all base DoFs when checking a fixed-base version of the same task.
+
+The Python-side numerical metric defaults live in `CapabilityMetricConfig` / `CAPABILITY_METRIC` in
+`python/examples/cabinet_demo_common.py`. They are deliberately not CLI arguments:
+
+```python
+CAPABILITY_METRIC = CapabilityMetricConfig(
+    arm_weight=1.0,
+    joint_limit_barrier_gain=1.0,
+    joint_limit_barrier_epsilon=1e-3,
+    base_translation_weight=400.0,
+    base_rotation_weight=25.0,
+    closure_secondary_weight=1.0,
+    svd_relative_tolerance=1e-8,
+    svd_absolute_tolerance=1e-8,
+)
+```
 
 The cabinet tasks preserve their cabinet placement, handle/hinge definitions, and free virtual handle axes. Their
 deterministic goals are a `0.15 m` drawer pull and a `-pi/2` (90-degree) door opening. The real Piper-L and articulated

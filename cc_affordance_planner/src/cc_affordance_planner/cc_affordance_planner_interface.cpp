@@ -1,5 +1,6 @@
 #include <affordance_util/affordance_util.hpp>
 #include <cc_affordance_planner/cc_affordance_planner_interface.hpp>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -49,10 +50,32 @@ CcAffordancePlannerInterface::CcAffordancePlannerInterface(const PlannerConfig &
     {
         throw std::invalid_argument("Planner config: 'svd_relative_tolerance' must be finite and positive.");
     }
+    if (planner_config.svd_absolute_tolerance < 0.0 ||
+        !std::isfinite(planner_config.svd_absolute_tolerance))
+    {
+        throw std::invalid_argument("Planner config: 'svd_absolute_tolerance' must be finite and non-negative.");
+    }
     if (planner_config.residual_mobility_tolerance < 0.0 ||
         !std::isfinite(planner_config.residual_mobility_tolerance))
     {
         throw std::invalid_argument("Planner config: 'residual_mobility_tolerance' must be finite and non-negative.");
+    }
+    if (!(planner_config.soft_limit_ratio > 0.0) || planner_config.soft_limit_ratio > 1.0 ||
+        !std::isfinite(planner_config.soft_limit_ratio))
+    {
+        throw std::invalid_argument("Planner config: 'soft_limit_ratio' must be in the range (0,1].");
+    }
+    const std::array positive_metric_parameters = {
+        planner_config.arm_mobility_weight, planner_config.joint_limit_barrier_epsilon,
+        planner_config.base_translation_weight, planner_config.base_rotation_weight,
+        planner_config.closure_secondary_weight};
+    if (std::any_of(positive_metric_parameters.begin(), positive_metric_parameters.end(),
+                    [](const double value) { return !(value > 0.0) || !std::isfinite(value); }) ||
+        planner_config.joint_limit_barrier_gain < 0.0 ||
+        !std::isfinite(planner_config.joint_limit_barrier_gain))
+    {
+        throw std::invalid_argument(
+            "Planner config: mobility weights/epsilon must be finite and positive; barrier gain must be non-negative.");
     }
     if (planner_config.joint_limit_margin < 0.0 || !std::isfinite(planner_config.joint_limit_margin) ||
         planner_config.joint_limit_tolerance < 0.0 || !std::isfinite(planner_config.joint_limit_tolerance))
@@ -72,11 +95,12 @@ PlannerResult CcAffordancePlannerInterface::generate_joint_trajectory(
     PlannerResult plannerResult;
 
     affordance_util::ReserveMobilityDescription reserve_mobility = task_description.reserve_mobility;
-    // Disabling both RM extensions is an explicit compatibility mode. Ignore the attached reserve model entirely and
+    // Disabling every RM extension is an explicit compatibility mode. Ignore the attached reserve model entirely and
     // use the same model composition, solver selection, and trajectory conversion as the original fixed-base CCA.
     const bool rm_planning_enabled =
         reserve_mobility.enabled &&
-        (planner_config_.enable_joint_limits || planner_config_.enable_nullspace_planning);
+        (planner_config_.enable_joint_limits || planner_config_.enable_nullspace_planning ||
+         planner_config_.enable_capability_aware_planning);
     Eigen::Index feasible_arm_dof_for_diagnostics = robot_description.joint_states.size();
     if (rm_planning_enabled)
     {
@@ -277,7 +301,11 @@ PlannerResult CcAffordancePlannerInterface::generate_specified_motion_joint_traj
         inverseResult = (ccAffordancePlannerInversePtr->*generate_specified_motion_joint_trajectory)(
             slist, secondary_joint_goals, nof_secondary_joints, trajectory_density);
         inverseResult.update_method = UpdateMethod::INVERSE;
-        if (planner_config_.enable_joint_limits && planner_config_.enable_nullspace_planning)
+        if (planner_config_.enable_capability_aware_planning)
+        {
+            inverseResult.update_trail += "capability-aware rm-cca inverse";
+        }
+        else if (planner_config_.enable_joint_limits && planner_config_.enable_nullspace_planning)
         {
             inverseResult.update_trail += "rm-cca inverse";
         }
@@ -526,10 +554,14 @@ void CcAffordancePlannerInterface::validate_input_(const affordance_util::RobotD
         {
             throw std::invalid_argument("Robot description: a starting joint state lies outside its joint limits.");
         }
+        const double effective_width =
+            std::isfinite(lower) && std::isfinite(upper)
+                ? planner_config_.soft_limit_ratio * (upper - lower)
+                : std::numeric_limits<double>::infinity();
         if (task_description.reserve_mobility.enabled && planner_config_.enable_joint_limits &&
-            !(lower + planner_config_.joint_limit_margin < upper - planner_config_.joint_limit_margin))
+            !(2.0 * planner_config_.joint_limit_margin < effective_width))
         {
-            throw std::invalid_argument("Planner joint-limit margin leaves no safe interval for an arm joint.");
+            throw std::invalid_argument("Planner soft joint limit and margin leave no safe interval for an arm joint.");
         }
     }
 
@@ -542,7 +574,8 @@ void CcAffordancePlannerInterface::validate_input_(const affordance_util::RobotD
     const affordance_util::ReserveMobilityDescription &reserve = task_description.reserve_mobility;
     const bool rm_planning_enabled =
         reserve.enabled &&
-        (planner_config_.enable_joint_limits || planner_config_.enable_nullspace_planning);
+        (planner_config_.enable_joint_limits || planner_config_.enable_nullspace_planning ||
+         planner_config_.enable_capability_aware_planning);
     if (rm_planning_enabled)
     {
         const Eigen::Index reserve_dof = reserve.slist.cols();

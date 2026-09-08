@@ -93,8 +93,17 @@ CcAffordancePlanner::CcAffordancePlanner(const PlannerConfig &plannerConfig)
       max_itr_l_(plannerConfig.ik_max_itr),
       enable_joint_limits_(plannerConfig.enable_joint_limits),
       enable_nullspace_planning_(plannerConfig.enable_nullspace_planning),
+      enable_capability_aware_planning_(plannerConfig.enable_capability_aware_planning),
       svd_relative_tolerance_(plannerConfig.svd_relative_tolerance),
+      svd_absolute_tolerance_(plannerConfig.svd_absolute_tolerance),
       residual_mobility_tolerance_(plannerConfig.residual_mobility_tolerance),
+      soft_limit_ratio_(plannerConfig.soft_limit_ratio),
+      arm_mobility_weight_(plannerConfig.arm_mobility_weight),
+      joint_limit_barrier_gain_(plannerConfig.joint_limit_barrier_gain),
+      joint_limit_barrier_epsilon_(plannerConfig.joint_limit_barrier_epsilon),
+      base_translation_weight_(plannerConfig.base_translation_weight),
+      base_rotation_weight_(plannerConfig.base_rotation_weight),
+      closure_secondary_weight_(plannerConfig.closure_secondary_weight),
       joint_limit_margin_(plannerConfig.joint_limit_margin),
       joint_limit_tolerance_(plannerConfig.joint_limit_tolerance)
 {
@@ -197,6 +206,44 @@ Eigen::VectorXd CcAffordancePlanner::make_primary_start_guess() const
         scatter_update(theta_pg, reserve_primary_indices_, reserve_mobility_.initial_state);
     }
     return theta_pg;
+}
+
+Eigen::VectorXd CcAffordancePlanner::make_primary_mobility_metric(const Eigen::VectorXd &theta_p) const
+{
+    if (theta_p.size() != static_cast<Eigen::Index>(nof_pjoints_))
+    {
+        throw std::invalid_argument("Capability metric state does not match the primary-coordinate count.");
+    }
+
+    Eigen::VectorXd metric = Eigen::VectorXd::Constant(theta_p.size(), arm_mobility_weight_);
+    for (size_t i = 0; i < reserve_primary_indices_.size(); ++i)
+    {
+        metric(static_cast<Eigen::Index>(reserve_primary_indices_[i])) =
+            i < 3 ? base_translation_weight_ : base_rotation_weight_;
+    }
+    if (!enable_joint_limits_)
+    {
+        return metric;
+    }
+    for (size_t i = 0; i < arm_primary_indices_.size(); ++i)
+    {
+        const Eigen::Index metric_index = static_cast<Eigen::Index>(arm_primary_indices_[i]);
+        const double lower = arm_lower_limits_(static_cast<Eigen::Index>(i));
+        const double upper = arm_upper_limits_(static_cast<Eigen::Index>(i));
+        if (!std::isfinite(lower) || !std::isfinite(upper))
+        {
+            continue;
+        }
+        const double center = lower + 0.5 * (upper - lower);
+        const double soft_half_range = 0.5 * soft_limit_ratio_ * (upper - lower);
+        const double absolute_state = arm_start_absolute_(static_cast<Eigen::Index>(i)) + theta_p(metric_index);
+        const double normalized_distance = std::min(1.0, std::abs(absolute_state - center) / soft_half_range);
+        const double squared_distance = normalized_distance * normalized_distance;
+        const double denominator = 1.0 - squared_distance + joint_limit_barrier_epsilon_;
+        metric(metric_index) +=
+            joint_limit_barrier_gain_ * squared_distance / (denominator * denominator);
+    }
+    return metric;
 }
 
 void CcAffordancePlanner::append_trajectory_point(PlannerResult &result,
@@ -857,14 +904,21 @@ std::optional<Eigen::VectorXd> CcAffordancePlanner::call_rm_cc_ik_solver(
         for (size_t i = 0; i < arm_primary_indices_.size(); ++i)
         {
             const Eigen::Index primary_index = static_cast<Eigen::Index>(arm_primary_indices_[i]);
+            double lower = arm_lower_limits_(static_cast<Eigen::Index>(i));
+            double upper = arm_upper_limits_(static_cast<Eigen::Index>(i));
+            if (std::isfinite(lower) && std::isfinite(upper))
+            {
+                const double center = lower + 0.5 * (upper - lower);
+                const double soft_half_range = 0.5 * soft_limit_ratio_ * (upper - lower);
+                lower = center - soft_half_range;
+                upper = center + soft_half_range;
+            }
             // The safe interval normally excludes a small margin. If a supplied start state is already inside that
             // margin, keep the start itself admissible so the joint can move back toward the interior.
             primary_lower(primary_index) =
-                std::min(0.0, arm_lower_limits_(static_cast<Eigen::Index>(i)) + joint_limit_margin_ -
-                                  arm_start_absolute_(static_cast<Eigen::Index>(i)));
+                std::min(0.0, lower + joint_limit_margin_ - arm_start_absolute_(static_cast<Eigen::Index>(i)));
             primary_upper(primary_index) =
-                std::max(0.0, arm_upper_limits_(static_cast<Eigen::Index>(i)) - joint_limit_margin_ -
-                                  arm_start_absolute_(static_cast<Eigen::Index>(i)));
+                std::max(0.0, upper - joint_limit_margin_ - arm_start_absolute_(static_cast<Eigen::Index>(i)));
         }
     }
 
@@ -918,17 +972,30 @@ std::optional<Eigen::VectorXd> CcAffordancePlanner::call_rm_cc_ik_solver(
 
         // Closed-chain constraint mapping: Jc = d(theta_s) / d(theta_p).
         const Eigen::MatrixXd Jc =
-            compute_closed_chain_mapping(Np, Ns, rho, theta_pdot, svd_relative_tolerance_);
+            compute_closed_chain_mapping(Np, Ns, rho, theta_pdot, svd_relative_tolerance_,
+                                         svd_absolute_tolerance_);
         oldtheta_p = theta_p;
 
         const Eigen::VectorXd task_error = theta_sd - theta_s;
         const Eigen::VectorXd reserve_before = reserve_values(theta_p);
 
-        // Primary task: the original CCA Newton correction. Secondary task: eliminate base motion through the
-        // feasible primary-task null space. Boundary variables are frozen only inside this active-set solve.
-        FeasibleNullSpaceStep task_step = compute_feasible_nullspace_step(
-            Jc, task_error, theta_p, primary_lower, primary_upper, arm_primary_indices_, stationary_reserve_indices,
-            svd_relative_tolerance_, joint_limit_tolerance_);
+        // The capability-aware mode uses one heterogeneous metric. The original mode retains strict base
+        // stationarity in the feasible CCA null space. Both use the same direction-aware configured-bound active set.
+        FeasibleNullSpaceStep task_step;
+        if (enable_capability_aware_planning_)
+        {
+            const Eigen::VectorXd primary_metric = make_primary_mobility_metric(theta_p);
+            task_step = compute_feasible_metric_step(
+                Jc, task_error, theta_p, primary_lower, primary_upper, primary_metric, arm_primary_indices_,
+                reserve_primary_indices_, svd_relative_tolerance_, joint_limit_tolerance_, svd_absolute_tolerance_);
+        }
+        else
+        {
+            task_step = compute_feasible_nullspace_step(
+                Jc, task_error, theta_p, primary_lower, primary_upper, arm_primary_indices_,
+                stationary_reserve_indices, svd_relative_tolerance_, joint_limit_tolerance_,
+                svd_absolute_tolerance_);
+        }
         Eigen::VectorXd primary_delta = task_step.delta;
         limit_reserve_increment(primary_delta,
                                 Eigen::VectorXd::Zero(static_cast<Eigen::Index>(reserve_primary_indices_.size())));
@@ -941,8 +1008,8 @@ std::optional<Eigen::VectorXd> CcAffordancePlanner::call_rm_cc_ik_solver(
         // differential together; the following finite closure solve then removes only the linearization error.
         theta_s += hierarchy_newton_gain * task_error;
 
-        // Closure correction has the identical hierarchy: remove rho while preserving the advanced CCA state, then
-        // eliminate reserve motion only in that combined primary-task null space.
+        // Closure recovery uses the selected allocation rule as well. Capability-aware mode solves directly over
+        // [primary, secondary] with block metric diag(Ga, Gb, Gs); strict mode preserves the advanced secondary state.
         Eigen::VectorXd closure_state(slist.cols());
         closure_state << theta_p, theta_s;
         Eigen::VectorXd closure_lower =
@@ -953,18 +1020,32 @@ std::optional<Eigen::VectorXd> CcAffordancePlanner::call_rm_cc_ik_solver(
         closure_upper.head(static_cast<Eigen::Index>(nof_pjoints_)) = primary_upper;
         const Eigen::MatrixXd raw_closure_jacobian = affordance_util::JacobianSpace(slist, closure_state);
         const Eigen::VectorXd closure_error = compute_closure_error(slist, theta_p, theta_s);
-        // Closure recovery must not undo the CCA task state that the primary Newton step just advanced. Treat
-        // zero secondary-variable drift as part of the closure primary task, and apply base stationarity only in
-        // the null space shared by closure recovery and CCA-state preservation.
-        Eigen::MatrixXd closure_jacobian(closure_error.size() + theta_s.size(), closure_state.size());
-        closure_jacobian.topRows(closure_error.size()) = raw_closure_jacobian;
-        closure_jacobian.bottomRows(theta_s.size()).setZero();
-        closure_jacobian.bottomRightCorner(theta_s.size(), theta_s.size()).setIdentity();
-        Eigen::VectorXd closure_task_error(closure_error.size() + theta_s.size());
-        closure_task_error << closure_error, Eigen::VectorXd::Zero(theta_s.size());
-        FeasibleNullSpaceStep closure_step = compute_feasible_nullspace_step(
-            closure_jacobian, closure_task_error, closure_state, closure_lower, closure_upper, arm_primary_indices_,
-            stationary_reserve_indices, svd_relative_tolerance_, joint_limit_tolerance_);
+        FeasibleNullSpaceStep closure_step;
+        if (enable_capability_aware_planning_)
+        {
+            Eigen::VectorXd closure_metric =
+                Eigen::VectorXd::Constant(closure_state.size(), closure_secondary_weight_);
+            closure_metric.head(static_cast<Eigen::Index>(nof_pjoints_)) =
+                make_primary_mobility_metric(theta_p);
+            closure_step = compute_feasible_metric_step(
+                raw_closure_jacobian, closure_error, closure_state, closure_lower, closure_upper, closure_metric,
+                arm_primary_indices_, reserve_primary_indices_, svd_relative_tolerance_, joint_limit_tolerance_,
+                svd_absolute_tolerance_);
+        }
+        else
+        {
+            // Strict RM-CCA must not undo the CCA secondary state that the primary step just advanced.
+            Eigen::MatrixXd closure_jacobian(closure_error.size() + theta_s.size(), closure_state.size());
+            closure_jacobian.topRows(closure_error.size()) = raw_closure_jacobian;
+            closure_jacobian.bottomRows(theta_s.size()).setZero();
+            closure_jacobian.bottomRightCorner(theta_s.size(), theta_s.size()).setIdentity();
+            Eigen::VectorXd closure_task_error(closure_error.size() + theta_s.size());
+            closure_task_error << closure_error, Eigen::VectorXd::Zero(theta_s.size());
+            closure_step = compute_feasible_nullspace_step(
+                closure_jacobian, closure_task_error, closure_state, closure_lower, closure_upper,
+                arm_primary_indices_, stationary_reserve_indices, svd_relative_tolerance_, joint_limit_tolerance_,
+                svd_absolute_tolerance_);
+        }
         Eigen::VectorXd closure_delta = closure_step.delta;
         Eigen::VectorXd task_reserve_use(static_cast<Eigen::Index>(reserve_primary_indices_.size()));
         for (size_t i = 0; i < reserve_primary_indices_.size(); ++i)

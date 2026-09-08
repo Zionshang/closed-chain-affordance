@@ -48,11 +48,13 @@ bool contains(const std::unordered_set<size_t> &indices, const size_t index)
 }
 } // namespace
 
-Eigen::MatrixXd pseudo_inverse_svd(const Eigen::MatrixXd &matrix, const double relative_tolerance)
+Eigen::MatrixXd pseudo_inverse_svd(const Eigen::MatrixXd &matrix, const double relative_tolerance,
+                                   const double absolute_tolerance)
 {
-    if (!(relative_tolerance > 0.0) || !std::isfinite(relative_tolerance))
+    if (!(relative_tolerance > 0.0) || !std::isfinite(relative_tolerance) || absolute_tolerance < 0.0 ||
+        !std::isfinite(absolute_tolerance))
     {
-        throw std::invalid_argument("SVD relative tolerance must be finite and positive.");
+        throw std::invalid_argument("SVD relative tolerance must be positive and absolute tolerance non-negative.");
     }
     if (matrix.rows() == 0 || matrix.cols() == 0)
     {
@@ -68,10 +70,7 @@ Eigen::MatrixXd pseudo_inverse_svd(const Eigen::MatrixXd &matrix, const double r
     Eigen::VectorXd inverse_values = Eigen::VectorXd::Zero(singular_values.size());
     if (singular_values.size() > 0)
     {
-        // The absolute floor is essential for projected matrices such as B*N. When the usable null space is empty,
-        // B*N is theoretically zero but floating-point projection leaves O(epsilon) entries; a purely relative
-        // cutoff would normalize that numerical noise and invert it into an enormous false mobility direction.
-        const double cutoff = relative_tolerance * std::max(1.0, singular_values(0));
+        const double cutoff = std::max(absolute_tolerance, relative_tolerance * singular_values(0));
         for (Eigen::Index i = 0; i < singular_values.size(); ++i)
         {
             if (singular_values(i) > cutoff)
@@ -114,21 +113,23 @@ void scatter_update(Eigen::VectorXd &target, const std::vector<size_t> &indices,
 
 Eigen::MatrixXd compute_closed_chain_mapping(const Eigen::MatrixXd &Np, const Eigen::MatrixXd &Ns,
                                               const Eigen::VectorXd &rho, const Eigen::VectorXd &theta_pdot,
-                                              const double svd_relative_tolerance)
+                                              const double svd_relative_tolerance,
+                                              const double svd_absolute_tolerance)
 {
     if (Np.rows() != Ns.rows() || rho.size() != Np.rows() || theta_pdot.size() != Np.cols())
     {
         throw std::invalid_argument("Closed-chain mapping matrix dimensions are inconsistent.");
     }
     const Eigen::MatrixXd theta_pdot_matrix = theta_pdot;
-    return -pseudo_inverse_svd(Ns, svd_relative_tolerance) *
-           (Np + rho * pseudo_inverse_svd(theta_pdot_matrix, svd_relative_tolerance));
+    return -pseudo_inverse_svd(Ns, svd_relative_tolerance, svd_absolute_tolerance) *
+           (Np + rho * pseudo_inverse_svd(theta_pdot_matrix, svd_relative_tolerance, svd_absolute_tolerance));
 }
 
 NullSpaceHierarchyStep compute_base_stationary_step(const Eigen::MatrixXd &jacobian,
                                                     const Eigen::VectorXd &error,
                                                     const std::vector<size_t> &reserve_column_indices,
-                                                    const double svd_relative_tolerance)
+                                                    const double svd_relative_tolerance,
+                                                    const double svd_absolute_tolerance)
 {
     if (jacobian.rows() != error.size() || !jacobian.allFinite() || !error.allFinite())
     {
@@ -137,7 +138,8 @@ NullSpaceHierarchyStep compute_base_stationary_step(const Eigen::MatrixXd &jacob
     validate_indices(static_cast<size_t>(jacobian.cols()), reserve_column_indices);
 
     NullSpaceHierarchyStep result;
-    const Eigen::MatrixXd pseudoinverse = pseudo_inverse_svd(jacobian, svd_relative_tolerance);
+    const Eigen::MatrixXd pseudoinverse =
+        pseudo_inverse_svd(jacobian, svd_relative_tolerance, svd_absolute_tolerance);
     const Eigen::VectorXd whole_body_delta = pseudoinverse * error;
     const Eigen::MatrixXd nullspace =
         Eigen::MatrixXd::Identity(jacobian.cols(), jacobian.cols()) - pseudoinverse * jacobian;
@@ -153,7 +155,8 @@ NullSpaceHierarchyStep compute_base_stationary_step(const Eigen::MatrixXd &jacob
                           static_cast<Eigen::Index>(reserve_column_indices[i])) = 1.0;
         }
         const Eigen::MatrixXd base_nullspace = base_selector * nullspace;
-        result.delta -= nullspace * pseudo_inverse_svd(base_nullspace, svd_relative_tolerance) *
+        result.delta -= nullspace *
+                        pseudo_inverse_svd(base_nullspace, svd_relative_tolerance, svd_absolute_tolerance) *
                         base_selector * whole_body_delta;
         result.base_delta = base_selector * result.delta;
     }
@@ -165,11 +168,39 @@ NullSpaceHierarchyStep compute_base_stationary_step(const Eigen::MatrixXd &jacob
     return result;
 }
 
+NullSpaceHierarchyStep compute_metric_weighted_step(
+    const Eigen::MatrixXd &jacobian, const Eigen::VectorXd &error, const Eigen::VectorXd &metric_diagonal,
+    const std::vector<size_t> &reserve_column_indices, const double svd_relative_tolerance,
+    const double svd_absolute_tolerance)
+{
+    if (jacobian.rows() != error.size() || jacobian.cols() != metric_diagonal.size() || !jacobian.allFinite() ||
+        !error.allFinite() || !metric_diagonal.allFinite() || (metric_diagonal.array() <= 0.0).any())
+    {
+        throw std::invalid_argument("Metric solve dimensions, values, or positive weights are invalid.");
+    }
+    validate_indices(static_cast<size_t>(jacobian.cols()), reserve_column_indices);
+
+    NullSpaceHierarchyStep result;
+    const Eigen::VectorXd inverse_sqrt_metric = metric_diagonal.array().sqrt().inverse();
+    const Eigen::MatrixXd whitening = inverse_sqrt_metric.asDiagonal();
+    const Eigen::MatrixXd whitened_jacobian = jacobian * whitening;
+    result.delta = whitening *
+                   pseudo_inverse_svd(whitened_jacobian, svd_relative_tolerance, svd_absolute_tolerance) * error;
+    result.task_residual = error - jacobian * result.delta;
+    result.base_delta.resize(static_cast<Eigen::Index>(reserve_column_indices.size()));
+    for (size_t i = 0; i < reserve_column_indices.size(); ++i)
+    {
+        result.base_delta(static_cast<Eigen::Index>(i)) =
+            result.delta(static_cast<Eigen::Index>(reserve_column_indices[i]));
+    }
+    return result;
+}
+
 FeasibleNullSpaceStep compute_feasible_nullspace_step(
     const Eigen::MatrixXd &jacobian, const Eigen::VectorXd &error, const Eigen::VectorXd &state,
     const Eigen::VectorXd &lower_limits, const Eigen::VectorXd &upper_limits,
     const std::vector<size_t> &arm_column_indices, const std::vector<size_t> &reserve_column_indices,
-    const double svd_relative_tolerance, const double bound_tolerance)
+    const double svd_relative_tolerance, const double bound_tolerance, const double svd_absolute_tolerance)
 {
     const Eigen::Index variable_count = jacobian.cols();
     if (jacobian.rows() != error.size() || state.size() != variable_count || lower_limits.size() != variable_count ||
@@ -240,7 +271,8 @@ FeasibleNullSpaceStep compute_feasible_nullspace_step(
             }
         }
         const NullSpaceHierarchyStep local_step = compute_base_stationary_step(
-            feasible_jacobian, remaining_error, local_reserve_indices, svd_relative_tolerance);
+            feasible_jacobian, remaining_error, local_reserve_indices, svd_relative_tolerance,
+            svd_absolute_tolerance);
 
         std::vector<double> candidate_alpha(active_indices.size(), std::numeric_limits<double>::infinity());
         double alpha = 1.0;
@@ -270,6 +302,143 @@ FeasibleNullSpaceStep compute_feasible_nullspace_step(
         if (newly_frozen.empty())
         {
             throw std::runtime_error("Bound active set clipped a correction without identifying a boundary.");
+        }
+        for (const size_t frozen : newly_frozen)
+        {
+            result.frozen_variable_indices.push_back(frozen);
+            if (arm_set.erase(frozen) > 0)
+            {
+                --result.active_arm_dof_count;
+            }
+        }
+        active_indices.erase(
+            std::remove_if(active_indices.begin(), active_indices.end(), [&](const size_t index) {
+                return std::find(newly_frozen.begin(), newly_frozen.end(), index) != newly_frozen.end();
+            }),
+            active_indices.end());
+    }
+
+    result.task_residual = error - jacobian * result.delta;
+    result.base_delta.resize(static_cast<Eigen::Index>(reserve_column_indices.size()));
+    for (size_t i = 0; i < reserve_column_indices.size(); ++i)
+    {
+        result.base_delta(static_cast<Eigen::Index>(i)) =
+            result.delta(static_cast<Eigen::Index>(reserve_column_indices[i]));
+    }
+    return result;
+}
+
+FeasibleNullSpaceStep compute_feasible_metric_step(
+    const Eigen::MatrixXd &jacobian, const Eigen::VectorXd &error, const Eigen::VectorXd &state,
+    const Eigen::VectorXd &lower_limits, const Eigen::VectorXd &upper_limits,
+    const Eigen::VectorXd &metric_diagonal, const std::vector<size_t> &arm_column_indices,
+    const std::vector<size_t> &reserve_column_indices, const double svd_relative_tolerance,
+    const double bound_tolerance, const double svd_absolute_tolerance)
+{
+    const Eigen::Index variable_count = jacobian.cols();
+    if (jacobian.rows() != error.size() || state.size() != variable_count || lower_limits.size() != variable_count ||
+        upper_limits.size() != variable_count || metric_diagonal.size() != variable_count || !jacobian.allFinite() ||
+        !error.allFinite() || !state.allFinite() || !metric_diagonal.allFinite() ||
+        (metric_diagonal.array() <= 0.0).any() || bound_tolerance < 0.0 || !std::isfinite(bound_tolerance))
+    {
+        throw std::invalid_argument("Feasible metric dimensions, values, weights, or tolerance are invalid.");
+    }
+    validate_indices(static_cast<size_t>(variable_count), arm_column_indices);
+    validate_indices(static_cast<size_t>(variable_count), reserve_column_indices);
+    std::unordered_set<size_t> arm_set(arm_column_indices.begin(), arm_column_indices.end());
+    const std::unordered_set<size_t> reserve_set(reserve_column_indices.begin(), reserve_column_indices.end());
+    for (const size_t index : reserve_column_indices)
+    {
+        if (contains(arm_set, index))
+        {
+            throw std::invalid_argument("Arm and reserve metric columns cannot overlap.");
+        }
+    }
+    for (Eigen::Index i = 0; i < variable_count; ++i)
+    {
+        if (std::isnan(lower_limits(i)) || std::isnan(upper_limits(i)) || lower_limits(i) > upper_limits(i) ||
+            state(i) < lower_limits(i) - bound_tolerance || state(i) > upper_limits(i) + bound_tolerance)
+        {
+            throw std::invalid_argument("Metric state is outside an invalid bound interval.");
+        }
+    }
+
+    FeasibleNullSpaceStep result;
+    result.delta = Eigen::VectorXd::Zero(variable_count);
+    result.active_arm_dof_count = arm_column_indices.size();
+    std::vector<size_t> active_indices;
+    active_indices.reserve(static_cast<size_t>(variable_count));
+    for (Eigen::Index i = 0; i < variable_count; ++i)
+    {
+        if (upper_limits(i) - lower_limits(i) <= bound_tolerance)
+        {
+            const size_t fixed_index = static_cast<size_t>(i);
+            result.frozen_variable_indices.push_back(fixed_index);
+            if (arm_set.erase(fixed_index) > 0)
+            {
+                --result.active_arm_dof_count;
+            }
+        }
+        else
+        {
+            active_indices.push_back(static_cast<size_t>(i));
+        }
+    }
+
+    const double solve_tolerance =
+        std::numeric_limits<double>::epsilon() * 100.0 * std::max(1.0, error.norm());
+    for (Eigen::Index active_set_iteration = 0; active_set_iteration <= variable_count; ++active_set_iteration)
+    {
+        const Eigen::VectorXd remaining_error = error - jacobian * result.delta;
+        if (remaining_error.norm() <= solve_tolerance || active_indices.empty())
+        {
+            break;
+        }
+
+        const Eigen::MatrixXd feasible_jacobian = select_columns(jacobian, active_indices);
+        Eigen::VectorXd feasible_metric(static_cast<Eigen::Index>(active_indices.size()));
+        std::vector<size_t> local_reserve_indices;
+        for (size_t local = 0; local < active_indices.size(); ++local)
+        {
+            feasible_metric(static_cast<Eigen::Index>(local)) =
+                metric_diagonal(static_cast<Eigen::Index>(active_indices[local]));
+            if (contains(reserve_set, active_indices[local]))
+            {
+                local_reserve_indices.push_back(local);
+            }
+        }
+        const NullSpaceHierarchyStep local_step = compute_metric_weighted_step(
+            feasible_jacobian, remaining_error, feasible_metric, local_reserve_indices, svd_relative_tolerance,
+            svd_absolute_tolerance);
+
+        std::vector<double> candidate_alpha(active_indices.size(), std::numeric_limits<double>::infinity());
+        double alpha = 1.0;
+        for (size_t local = 0; local < active_indices.size(); ++local)
+        {
+            const Eigen::Index global = static_cast<Eigen::Index>(active_indices[local]);
+            const double current = state(global) + result.delta(global);
+            candidate_alpha[local] = feasible_alpha(current, local_step.delta(static_cast<Eigen::Index>(local)),
+                                                    lower_limits(global), upper_limits(global));
+            alpha = std::min(alpha, candidate_alpha[local]);
+        }
+        alpha = std::clamp(alpha, 0.0, 1.0);
+        scatter_update(result.delta, active_indices, local_step.delta, alpha);
+        if (alpha >= 1.0 - bound_tolerance)
+        {
+            break;
+        }
+
+        std::vector<size_t> newly_frozen;
+        for (size_t local = 0; local < active_indices.size(); ++local)
+        {
+            if (candidate_alpha[local] <= alpha + bound_tolerance)
+            {
+                newly_frozen.push_back(active_indices[local]);
+            }
+        }
+        if (newly_frozen.empty())
+        {
+            throw std::runtime_error("Metric active set clipped a correction without identifying a boundary.");
         }
         for (const size_t frozen : newly_frozen)
         {

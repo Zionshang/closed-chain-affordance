@@ -37,7 +37,8 @@ struct FeasibleNullSpaceStep
  * Singular values sigma <= relative_tolerance * max(1, sigma_max) are treated as unavailable mobility directions.
  * The absolute floor prevents numerical noise in a theoretically zero projected matrix from becoming false mobility.
  */
-Eigen::MatrixXd pseudo_inverse_svd(const Eigen::MatrixXd &matrix, double relative_tolerance);
+Eigen::MatrixXd pseudo_inverse_svd(const Eigen::MatrixXd &matrix, double relative_tolerance,
+                                   double absolute_tolerance = 1e-8);
 
 /** @brief Selects matrix columns in the explicit order given by indices. */
 Eigen::MatrixXd select_columns(const Eigen::MatrixXd &matrix, const std::vector<size_t> &indices);
@@ -53,7 +54,8 @@ void scatter_update(Eigen::VectorXd &target, const std::vector<size_t> &indices,
  */
 Eigen::MatrixXd compute_closed_chain_mapping(const Eigen::MatrixXd &Np, const Eigen::MatrixXd &Ns,
                                               const Eigen::VectorXd &rho, const Eigen::VectorXd &theta_pdot,
-                                              double svd_relative_tolerance);
+                                              double svd_relative_tolerance,
+                                              double svd_absolute_tolerance = 1e-8);
 
 /**
  * @brief Solves one strict-priority feasible-variable correction.
@@ -68,7 +70,20 @@ Eigen::MatrixXd compute_closed_chain_mapping(const Eigen::MatrixXd &Np, const Ei
 NullSpaceHierarchyStep compute_base_stationary_step(const Eigen::MatrixXd &jacobian,
                                                     const Eigen::VectorXd &error,
                                                     const std::vector<size_t> &reserve_column_indices,
-                                                    double svd_relative_tolerance);
+                                                    double svd_relative_tolerance,
+                                                    double svd_absolute_tolerance = 1e-8);
+
+/**
+ * @brief Minimum-mobility-metric solution of J * delta = error.
+ *
+ * Uses whitening to evaluate
+ * delta = G^-1 J^T (J G^-1 J^T)^+ error
+ * without explicitly forming G^-1 or the normal-equation matrix.
+ */
+NullSpaceHierarchyStep compute_metric_weighted_step(
+    const Eigen::MatrixXd &jacobian, const Eigen::VectorXd &error,
+    const Eigen::VectorXd &metric_diagonal, const std::vector<size_t> &reserve_column_indices,
+    double svd_relative_tolerance, double svd_absolute_tolerance = 1e-8);
 
 /**
  * @brief Applies the same strict hierarchy with a direction-aware bound active set.
@@ -82,7 +97,15 @@ FeasibleNullSpaceStep compute_feasible_nullspace_step(
     const Eigen::MatrixXd &jacobian, const Eigen::VectorXd &error, const Eigen::VectorXd &state,
     const Eigen::VectorXd &lower_limits, const Eigen::VectorXd &upper_limits,
     const std::vector<size_t> &arm_column_indices, const std::vector<size_t> &reserve_column_indices,
-    double svd_relative_tolerance, double bound_tolerance);
+    double svd_relative_tolerance, double bound_tolerance, double svd_absolute_tolerance = 1e-8);
+
+/** @brief Metric-weighted CCA correction with the same configured-bound active set. */
+FeasibleNullSpaceStep compute_feasible_metric_step(
+    const Eigen::MatrixXd &jacobian, const Eigen::VectorXd &error, const Eigen::VectorXd &state,
+    const Eigen::VectorXd &lower_limits, const Eigen::VectorXd &upper_limits,
+    const Eigen::VectorXd &metric_diagonal, const std::vector<size_t> &arm_column_indices,
+    const std::vector<size_t> &reserve_column_indices, double svd_relative_tolerance,
+    double bound_tolerance, double svd_absolute_tolerance = 1e-8);
 
 /** @brief Computes the current six-dimensional closed-chain FK error. */
 Eigen::VectorXd compute_closure_error(const Eigen::MatrixXd &slist, const Eigen::VectorXd &theta_p,
